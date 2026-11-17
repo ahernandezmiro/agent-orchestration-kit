@@ -175,6 +175,22 @@ test("Claude implementation roles edit only through rules from editable_paths, w
   assert.ok(!codexPrompt.includes("## Worker environment"), "Codex prompts stay unchanged");
 });
 
+// R4, R7: whatever got past the CLI's rules, a change under .claude or inside .git fails the guard.
+test("a worker change under .claude or to .git config or hooks fails the git guard with exit 3", (t) => {
+  const f = fixture(t);
+  for (const [file, reason] of [[".claude/settings.json", "protected_paths"], ["src/.Claude/notes.md", "protected_paths"], [".git/hooks/pre-commit", "git_internals"]]) {
+    const result = f.dispatch(["run", "--role", "luna-implement", "--packet", f.packet("luna-implement"), "--cwd", f.project], { TEST_EDIT_FILES: file });
+    assert.equal(result.status, 3, `${file}: ${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /GIT GUARD: VIOLATION/);
+    const run = f.runRecord(result.stdout);
+    assert.equal(run.status, "git_guard_violation");
+    assert.ok(run.git_guard.changed.includes(reason), `${file}: ${JSON.stringify(run.git_guard)}`);
+    fs.rmSync(path.join(f.project, file), { force: true });
+  }
+  const clean = success(f.dispatch(["run", "--role", "luna-implement", "--packet", f.packet("luna-implement"), "--cwd", f.project], { TEST_EDIT_FILES: "src/ok.txt" }));
+  assert.match(clean, /GIT GUARD: OK \(no commits, branch, ref, remote, stash, config or hook changes\)/);
+});
+
 // R2, R4
 test("Claude gateway rejects luna-test and unsafe or empty editable_paths before submitting", (t) => {
   const f = fixture(t);

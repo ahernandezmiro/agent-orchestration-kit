@@ -35,8 +35,8 @@ function globCouldMatchProtected(segment) {
 
 /** cwd-relative posix paths whose case-folded segments include a protected name. */
 export function protectedTouched(relativePaths) {
-  // Trailing dots removed: Windows resolves .git. to .git.
-  return relativePaths.filter((rel) => rel.split("/").some((segment) => PROTECTED_DIRS.includes(segment.replace(/\.+$/, "").toLowerCase())));
+  // Trailing dots and spaces removed: Windows resolves `.git.` and `.git ` to .git.
+  return relativePaths.filter((rel) => rel.split("/").some((segment) => PROTECTED_DIRS.includes(segment.replace(/[. ]+$/, "").toLowerCase())));
 }
 
 export function supportsClaudeVersion(version) {

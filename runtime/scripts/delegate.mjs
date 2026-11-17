@@ -518,8 +518,35 @@ function gitSnapshot(cwd) {
     refs: git(root, ["for-each-ref", "--format=%(refname) %(objectname)"]),
     remotes: git(root, ["remote", "-v"]),
     stashes: git(root, ["stash", "list"]),
-    porcelain: git(root, ["status", "--porcelain=v1"])
+    porcelain: git(root, ["status", "--porcelain=v1"]),
+    git_internals: gitInternalsHash(root)
   };
+}
+
+/**
+ * Fingerprint of the repository's config, hooks and info/ files, the parts of .git a worker could
+ * change without moving refs. Reads the common dir, so worktrees share it with the main checkout.
+ * Input: repository root. Output: sha256 hex, or null when the directory cannot be read.
+ */
+function gitInternalsHash(root) {
+  const common = git(root, ["rev-parse", "--git-common-dir"]);
+  if (!common) return null;
+  const dir = path.resolve(root, common);
+  const hash = crypto.createHash("sha256");
+  const add = (rel) => {
+    const file = path.join(dir, rel);
+    let stat;
+    try { stat = fs.statSync(file); } catch { return; }
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(file).sort()) add(path.join(rel, name));
+    } else if (stat.isFile()) {
+      hash.update(`${rel.split(path.sep).join("/")}\0`);
+      hash.update(fs.readFileSync(file));
+      hash.update("\0");
+    }
+  };
+  try { for (const rel of ["config", "hooks", "info"]) add(rel); } catch { return null; }
+  return hash.digest("hex");
 }
 
 function porcelainFiles(output) {
@@ -547,8 +574,10 @@ function verifyGit(baseline, { quiet = false, worktree = null } = {}) {
     changed = ["head", "branch", "remotes", "stashes"].filter((k) => (now?.[k] ?? null) !== baseline[k]);
     if (relevantRefs(now?.refs) !== relevantRefs(baseline.refs)) changed.push("refs");
   } else changed = ["head", "branch", "refs", "remotes", "stashes"].filter((k) => (now?.[k] ?? null) !== baseline[k]);
+  // Baselines saved before this field existed have no fingerprint to compare.
+  if (Object.hasOwn(baseline, "git_internals") && (now?.git_internals ?? null) !== baseline.git_internals) changed.push("git_internals");
   if (changed.length === 0) {
-    if (!quiet) console.log("GIT GUARD: OK (no commits, branch, ref, remote or stash changes)");
+    if (!quiet) console.log("GIT GUARD: OK (no commits, branch, ref, remote, stash, config or hook changes)");
     return { ok: true, changed, now };
   }
   if (!quiet) {
@@ -1080,7 +1109,7 @@ async function cmdRun(options) {
   saveRun(run, "run_finished");
 
   console.log(`TELEMETRY: ${runFile}`);
-  if (!guard.ok) return 3;
+  if (!run.git_guard.ok) return 3;
   return result.status;
 }
 
@@ -1117,7 +1146,7 @@ async function finalizeExecRun(run, job) {
   run.git_guard = { ok: guard.ok, changed: guard.changed };
   run.changed_files_after = gitChangedFiles(run.cwd);
   recordWorkerResult(run, message);
-  run.status = !guard.ok ? "git_guard_violation" : normalized.status;
+  run.status = !run.git_guard.ok ? "git_guard_violation" : normalized.status;
   if (run.status !== "completed" && run.failure_hint !== "quota") run.failure_hint = normalized.failure_hint;
   run.exec.thread_id = events.thread_id;
   run.exec.failures = events.failures || [];
@@ -1136,7 +1165,7 @@ async function finalizeExecRun(run, job) {
   run.worker_duration_ms = duration;
   saveRun(run, "run_collected");
   console.log(`TELEMETRY: ${run.run_file}`);
-  return !guard.ok ? 3 : run.status === "completed" ? 0 : 1;
+  return !run.git_guard.ok ? 3 : run.status === "completed" ? 0 : 1;
 }
 
 /**
@@ -1183,7 +1212,13 @@ function recordWorkerResult(run, output, reportedFiles = null) {
     // Snapshots cover the working tree, not .git internals (the git guard covers refs); this
     // catches .claude and nested .git content, whatever the letter case.
     run.protected_files_touched = protectedTouched((run.touched_files || []).map((f) => path.relative(run.git_root, f).split(path.sep).join("/")));
-    if (run.protected_files_touched.length) console.log(`PROTECTED: worker changed ${run.protected_files_touched.join(", ")}`);
+    if (run.protected_files_touched.length) {
+      // Deny rules cannot list every spelling a file system resolves to a protected name, so a
+      // change there is treated like a git-state change: the run fails the guard (exit 3).
+      console.log(`GIT GUARD: VIOLATION — worker changed protected paths: ${run.protected_files_touched.join(", ")}`);
+      run.git_guard = { ok: false, changed: [...(run.git_guard?.changed || []), "protected_paths"] };
+      run.status = "git_guard_violation";
+    }
   }
   run.worker_report = parseWorkerReport(output);
   if (run.status === "failed" && looksLikeQuotaStop(output)) run.failure_hint = "quota";
@@ -1307,7 +1342,7 @@ async function cmdCollect(options, positionals) {
   recordWorkerResult(companionRun, output, job.result?.touchedFiles ?? []);
   saveRun(companionRun, "run_collected");
   console.log(`TELEMETRY: ${companionRun.run_file}`);
-  return guard.ok ? 0 : 3;
+  return companionRun.git_guard.ok ? 0 : 3;
   });
   return await locked;
 }
