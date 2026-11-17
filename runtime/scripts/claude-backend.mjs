@@ -21,7 +21,9 @@ function caseVariants(name) {
   return [...name].reduce((acc, ch) => acc.flatMap((prefix) =>
     ch.toLowerCase() === ch.toUpperCase() ? [prefix + ch] : [prefix + ch.toLowerCase(), prefix + ch.toUpperCase()]), [""]);
 }
-const PROTECTED_DENY = PROTECTED_DIRS.flatMap(caseVariants).flatMap((name) => [`Edit(**/${name})`, `Edit(**/${name}/**)`]);
+// `name.*` also covers trailing-dot forms (.git., .git..), which Windows resolves to the name.
+const PROTECTED_DENY = PROTECTED_DIRS.flatMap(caseVariants)
+  .flatMap((name) => [`Edit(**/${name})`, `Edit(**/${name}/**)`, `Edit(**/${name}.*)`, `Edit(**/${name}.*/**)`]);
 
 // True when one path segment using only literals, * and ? matches a protected name, ignoring
 // case. editRulesFor rejects classes and braces before this runs, so nothing else needs parsing.
@@ -33,7 +35,8 @@ function globCouldMatchProtected(segment) {
 
 /** cwd-relative posix paths whose case-folded segments include a protected name. */
 export function protectedTouched(relativePaths) {
-  return relativePaths.filter((rel) => rel.split("/").some((segment) => PROTECTED_DIRS.includes(segment.toLowerCase())));
+  // Trailing dots removed: Windows resolves .git. to .git.
+  return relativePaths.filter((rel) => rel.split("/").some((segment) => PROTECTED_DIRS.includes(segment.replace(/\.+$/, "").toLowerCase())));
 }
 
 export function supportsClaudeVersion(version) {
@@ -93,13 +96,13 @@ export function editRulesFor(entries, cwd) {
     if (!relative || relative === ".") return { error: `editable_paths entry '${raw}' names the whole working directory; list paths instead` };
     const segments = relative.split("/").filter(Boolean);
     if (segments.every((segment) => /^[*?]+$/.test(segment))) return { error: `editable_paths entry '${raw}' matches the whole working directory; list paths instead` };
-    // Windows drops trailing dots from a name, so `.git.` reaches .git; compare without them.
-    const normalized = segments.map((segment) => segment.replace(/\.+$/, ""));
-    if (normalized.some((segment) => !segment)) return { error: `editable_paths entry '${raw}' has a segment made only of dots` };
-    if (normalized.some((segment) => PROTECTED_DIRS.includes(segment.toLowerCase()))) return { error: `editable_paths entry '${raw}' reaches ${PROTECTED_DIRS.join(" or ")}, which workers may not edit` };
+    // Windows drops trailing dots from a name, so `.git.` reaches .git and `*.` can match it.
+    // Reject them rather than trim them, so every later check sees the segment as written.
+    if (segments.some((segment) => segment.endsWith("."))) return { error: `editable_paths entry '${raw}' has a segment ending in a dot` };
+    if (segments.some((segment) => PROTECTED_DIRS.includes(segment.toLowerCase()))) return { error: `editable_paths entry '${raw}' reaches ${PROTECTED_DIRS.join(" or ")}, which workers may not edit` };
     // A glob segment such as .g*, ?git or *t could match a protected name. Bare * and ** segments
     // are needed for ordinary entries (src/**) and are covered by the deny rules.
-    if (normalized.some((segment) => !/^\*{1,2}$/.test(segment) && globCouldMatchProtected(segment))) {
+    if (segments.some((segment) => !/^\*{1,2}$/.test(segment) && globCouldMatchProtected(segment))) {
       return { error: `editable_paths entry '${raw}' has a glob segment that could match ${PROTECTED_DIRS.join(" or ")}; name those paths literally` };
     }
     const glob = /[*?[\]{}]/.test(relative);

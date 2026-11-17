@@ -45,7 +45,8 @@ test("editRulesFor maps directories, files and globs and rejects unsafe entries"
     [[".g*/hooks"], /could match/], [["?claude/x"], /could match/], [["*t/config"], /could match/], [["pkg/.CL*"], /could match/],
     [[".[Gg]it/config"], /uses \[, \], \{, \}, : or ~/], [["{.git}/x"], /uses \[/], [["[.]git"], /uses \[/], [["src/[]]x"], /uses \[/],
     [[".git:stream"], /uses \[/], [["GIT~1/config"], /uses \[/], [["src/a~b"], /uses \[/],
-    [[".git./config"], /reaches/], [["pkg/.CLAUDE.../x"], /reaches/], [[".gi?./x"], /could match/], [["src/.../x"], /only of dots/]
+    [[".git./config"], /ending in a dot/], [["pkg/.CLAUDE.../x"], /ending in a dot/], [[".gi?./x"], /ending in a dot/],
+    [["src/.../x"], /ending in a dot/], [["src/*."], /ending in a dot/], [["src/**./x"], /ending in a dot/]
   ]) assert.match(editRulesFor(entries, cwd).error, message, JSON.stringify(entries));
 });
 
@@ -65,13 +66,14 @@ test("buildClaudeArgs varies by auth mode and role, never allows Bash, MCP or su
   assert.equal(value(write, "--allowedTools"), "Read,Glob,Grep,Edit(./src/**)");
   const deny = value(write, "--disallowedTools").split(",");
   assert.deepEqual(deny.slice(0, 2), ["mcp__*", "Agent"]);
-  for (const rule of ["Edit(**/.git)", "Edit(**/.git/**)", "Edit(**/.GIT/**)", "Edit(**/.Git)", "Edit(**/.claude/**)", "Edit(**/.CLAUDE)", "Edit(**/.ClAuDe/**)"]) {
-    assert.ok(deny.includes(rule), `${rule}: deny rules outrank any glob allow rule, in every letter case`);
+  for (const rule of ["Edit(**/.git)", "Edit(**/.git/**)", "Edit(**/.GIT/**)", "Edit(**/.Git)", "Edit(**/.claude/**)", "Edit(**/.CLAUDE)", "Edit(**/.ClAuDe/**)",
+    "Edit(**/.git.*)", "Edit(**/.gIt.*/**)", "Edit(**/.Claude.*/**)"]) {
+    assert.ok(deny.includes(rule), `${rule}: deny rules outrank any glob allow rule, in every letter case and trailing-dot form`);
   }
-  assert.equal(deny.length, 2 + (8 + 64) * 2);
+  assert.equal(deny.length, 2 + (8 + 64) * 4);
   assert.equal(value(sub, "--disallowedTools"), "mcp__*,Agent", "read roles have no edit tools to deny");
-  assert.deepEqual(protectedTouched(["src/a.js", ".Claude/settings.json", "pkg/.GIT/hooks/pre-commit", "docs/.github/x"]),
-    [".Claude/settings.json", "pkg/.GIT/hooks/pre-commit"]);
+  assert.deepEqual(protectedTouched(["src/a.js", ".Claude/settings.json", "pkg/.GIT/hooks/pre-commit", "docs/.github/x", "src/.git../config"]),
+    [".Claude/settings.json", "pkg/.GIT/hooks/pre-commit", "src/.git../config"]);
   assert.ok(!write.join(" ").match(/Bash|PowerShell|WebFetch/));
   assert.ok(!sub.includes("--max-budget-usd"));
   assert.equal(value(buildClaudeArgs({ ...common, auth: "api", maxBudgetUsd: 2 }), "--max-budget-usd"), "2");
