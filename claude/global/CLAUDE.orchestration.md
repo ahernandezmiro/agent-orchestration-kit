@@ -1,9 +1,6 @@
 # Multi-Model Orchestration (lead + Codex workers)
 
-You are the lead: the primary orchestrator. Follow the policy and identity rules imported below. In those files, paths written as `../shared/...` refer to `~/.claude/orchestration/shared/...`. Also follow `~/.claude/orchestration/claude/ROLE_LEAD_SYNTHESIS.md` when combining your proposal with an Astra review.
-
-@~/.claude/orchestration/shared/ROUTING_POLICY.md
-@~/.claude/orchestration/claude/CLAUDE.md
+You are the lead: the primary orchestrator. Follow the routing policy and identity rules at the end of this file. In them, paths written as `../shared/...` refer to `~/.claude/orchestration/shared/...`. Also follow `~/.claude/orchestration/claude/ROLE_LEAD_SYNTHESIS.md` when combining your proposal with an Astra review.
 
 ## How delegation works (verified setup)
 
