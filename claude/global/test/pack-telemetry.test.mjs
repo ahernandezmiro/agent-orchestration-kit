@@ -92,3 +92,32 @@ test("--dry-run writes nothing", () => {
   assert.equal(result.written, false);
   assert.equal(fs.existsSync(out), false);
 });
+
+test("default sources are every local runtime with data, including a custom CODEX_HOME", async (t) => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const script = fileURLToPath(new URL("../../../runtime/scripts/pack-telemetry.mjs", import.meta.url));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pack-defaults-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const claudeRuntime = path.join(home, ".claude", "orchestration");
+  const codexRuntime = path.join(home, "custom codex", "orchestration");
+  const run = () => spawnSync(process.execPath, [script, "--dry-run", "--out", path.join(home, "out.zip")], {
+    encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, "custom codex") }
+  });
+
+  let result = run();
+  assert.notEqual(result.status, 0, "nothing to pack is an error");
+  assert.match(result.stderr, /no telemetry found in:[\s\S]*\.claude[\\/]orchestration/);
+
+  fs.mkdirSync(path.join(codexRuntime, "telemetry"), { recursive: true });
+  fs.writeFileSync(path.join(codexRuntime, "telemetry", "events.jsonl"), '{"e":1}\n');
+  result = run();
+  assert.ok(result.stdout.includes(`pack  ${codexRuntime} -> `) && result.stdout.includes("-codex/"), result.stdout);
+  assert.ok(!result.stdout.includes(claudeRuntime), "a runtime without data is not listed once another has data");
+
+  fs.mkdirSync(path.join(claudeRuntime, "runs"), { recursive: true });
+  fs.writeFileSync(path.join(claudeRuntime, "runs", "r1.run.json"), JSON.stringify({ run_id: "r1" }));
+  result = run();
+  assert.ok(result.stdout.includes(`pack  ${claudeRuntime} -> `) && result.stdout.includes("-claude/"), result.stdout);
+  assert.ok(result.stdout.includes(`pack  ${codexRuntime} -> `), result.stdout);
+});

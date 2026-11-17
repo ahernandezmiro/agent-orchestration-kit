@@ -158,10 +158,10 @@ export function normalizeExecResult({ state, events, finalMessageExists }) {
  * Create a job and launch its detached runner.
  * Input: job paths, command vector, cwd and optional startup timeout. Output: Promise<{ state }> after runner acknowledgement or timeout.
  */
-export async function submitJob({ jobDir, command, prefixArgs = [], args, cwd, promptFile, format, envUnset = [], startupTimeoutMs = 10000 }) {
+export async function submitJob({ jobDir, command, prefixArgs = [], args, cwd, promptFile, format, envUnset = [], envSet = {}, startupTimeoutMs = 10000 }) {
   fs.mkdirSync(jobDir, { recursive: true });
   const absDir = path.resolve(jobDir);
-  atomicJson(path.join(absDir, "spec.json"), { command, prefixArgs, args, cwd, promptFile, env_unset: envUnset });
+  atomicJson(path.join(absDir, "spec.json"), { command, prefixArgs, args, cwd, promptFile, env_unset: envUnset, env_set: envSet });
   atomicJson(path.join(absDir, "state.json"), { format, status: "pending", submitted_at: new Date().toISOString(),
     runner_pid: null, child_pid: null, started_at: null, finished_at: null, exit_code: null,
     signal: null, spawn_error: null, io_error: null });

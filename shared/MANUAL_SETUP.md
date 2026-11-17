@@ -7,7 +7,7 @@ These actions may require human approval or should be verified manually.
 Use the authentication for the worker you plan to run.
 
 - For Codex workers, sign in to the Codex CLI.
-- For Claude workers, supply your Claude Console API key in `ANTHROPIC_API_KEY` through the gateway's shell environment. Keep credentials out of kit files. [Claude worker setup](../codex/LEAD_INSTALL.md#delegate-a-review-to-claude-code)
+- For Claude workers, sign in to Claude Code (subscription, the default). For API-key mode, set `ORCH_CLAUDE_AUTH=api` and supply your Claude Console API key in `ANTHROPIC_API_KEY` through the gateway's shell environment. Keep credentials out of kit files. [Claude workers](../README.md#claude-workers)
 
 ## 2. Verify optional plugin commands
 

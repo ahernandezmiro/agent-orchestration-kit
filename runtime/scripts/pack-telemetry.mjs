@@ -6,9 +6,10 @@
 //                           [--exclude-raw] [--exclude-validation] [--dry-run]
 //
 // Sources (each is an orchestration dir that holds runs/ and/or telemetry/):
-//   default        the runtime containing this script. From a checkout, falls back to
-//                  ~/.claude/orchestration for compatibility.
-//   --source <dir> pack this dir instead of the default; repeatable.
+//   default        every local runtime that holds data, whichever lead installed it:
+//                  ~/.claude/orchestration, $CODEX_HOME/orchestration (CODEX_HOME defaults to
+//                  ~/.codex) and the installed runtime containing this script.
+//   --source <dir> pack this dir instead of the defaults; repeatable.
 //   --all-hosts    also pick up the other side of a Windows/WSL machine: on Windows every WSL
 //                  distro's default Claude Code and Codex runtimes (via \\wsl.localhost), on WSL
 //                  the default runtimes under /mnt/<drive>/Users. Reading a stopped distro boots it.
@@ -93,12 +94,35 @@ function hasTelemetry(dir) {
 }
 
 /**
- * Use the installed runtime, or the original default for calls from the source checkout.
+ * Every local runtime a lead installs into: the Claude Code one, the Codex one ($CODEX_HOME,
+ * default ~/.codex) and, when this script runs from an installed copy elsewhere, that copy.
+ * Input: environment. Output: [{ dir, client }] with unique dirs, in that order.
  */
-export function defaultOrchestrationDir() {
-  const runtime = fileURLToPath(new URL("../", import.meta.url));
-  if (!fs.existsSync(path.join(runtime, "install-runtime.mjs"))) return runtime;
-  return path.join(os.homedir(), ".claude", "orchestration");
+export function localRuntimeDirs(env = process.env) {
+  const candidates = [
+    { dir: path.join(os.homedir(), ".claude", "orchestration"), client: "claude" },
+    { dir: path.resolve(env.CODEX_HOME || path.join(os.homedir(), ".codex"), "orchestration"), client: "codex" }
+  ];
+  const self = fileURLToPath(new URL("../", import.meta.url));
+  // A checkout has install-runtime.mjs next to scripts/; an installed runtime does not.
+  if (!fs.existsSync(path.join(self, "install-runtime.mjs"))) candidates.push({ dir: self, client: "runtime" });
+  const seen = new Set();
+  return candidates.filter(({ dir }) => {
+    const key = path.resolve(dir).toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * Default sources: the local runtimes that hold data. When none does, the Claude Code runtime
+ * is returned so the manifest reports it as skipped.
+ */
+export function defaultSources(localLabel, env = process.env) {
+  const runtimes = localRuntimeDirs(env);
+  const found = runtimes.filter(({ dir }) => hasTelemetry(dir));
+  return (found.length ? found : runtimes.slice(0, 1)).map(({ dir, client }) => ({ dir, label: `${localLabel}-${client}` }));
 }
 
 /**
@@ -155,7 +179,7 @@ export function resolveSources(options) {
   const localLabel = `${host}-${isWsl() ? "wsl" : process.platform}-${os.userInfo().username}`;
   const sources = options.sources.length
     ? options.sources.map((dir, i) => ({ dir: path.resolve(dir), label: `source${i + 1}-${path.basename(path.dirname(path.resolve(dir))) || "root"}` }))
-    : [{ dir: defaultOrchestrationDir(), label: localLabel }];
+    : defaultSources(localLabel);
   if (options.allHosts) {
     if (process.platform === "win32") sources.push(...discoverWslSources().map((s) => ({ ...s, label: `${host}-${s.label}` })));
     else if (isWsl()) sources.push(...discoverWindowsSourcesFromWsl().map((s) => ({ ...s, label: `${host}-${s.label}` })));

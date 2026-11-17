@@ -9,7 +9,7 @@ Install the client and authenticate the worker CLI you intend to use. Both clien
 - `claude/` and `codex/` contain client-specific installers, integration files, and setup guides.
 
 1. The lead owns requirements, architecture, decomposition, synthesis, and final sign-off.
-2. Use the Codex gateway for implementation and tests. Either gateway can handle independent review and investigation. Claude workers use read-only file tools.
+2. Use either gateway for implementation, review and investigation; use the Codex gateway for tests. Claude workers can read and edit files but have no shell, so the lead runs their checks.
 3. Give blind reviewers the requirements, constraints, and artifact. Keep the producing model's private reasoning out of the packet.
 4. Verify the worker report and record the outcome before final sign-off.
 

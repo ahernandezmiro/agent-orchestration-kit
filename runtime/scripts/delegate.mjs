@@ -59,7 +59,13 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolveCodexBin, resolveWorkerBin, buildExecArgs, submitJob, readJob, waitJob, cancelJob, reconcileLost, normalizeExecResult } from "./exec-backend.mjs";
-import { CLAUDE_EFFORTS, CLAUDE_ENV_UNSET, CLAUDE_MIN_VERSION, buildClaudeArgs, supportsClaudeVersion } from "./claude-backend.mjs";
+import {
+  CLAUDE_AUTH_MODES, CLAUDE_EFFORTS, CLAUDE_MIN_VERSION, buildClaudeArgs, claudeEnvironmentNote, claudeWorkerEnv, editRulesFor, supportsClaudeVersion
+} from "./claude-backend.mjs";
+import {
+  claudeOngoing, evaluateApiGate, evaluateSubscriptionGate, formatClaudeGateLine, loadClaudeQuotaRules, readRejectionOverride, readSubscriptionSnapshot
+} from "./claude-quota.mjs";
+import { localRuntimeDirs } from "./pack-telemetry.mjs";
 import {
   QUOTA_BLOCKED_EXIT_CODE, loadQuotaRules, readQuotaSnapshot, ongoingReservations, evaluateQuotaGate, formatGateLine
 } from "./quota-gate.mjs";
@@ -83,7 +89,7 @@ const QUOTA_CONFIG_FILE = path.join(KIT_ROOT, "config", "quota.json");
 
 const ROLES = {
   "luna-implement": {
-    write: true, defaultPrompt: "implement.md", contract: "task",
+    write: true, claude: true, defaultPrompt: "implement.md", contract: "task",
     required: ["id", "objective", "editable_paths", "acceptance_criteria"]
   },
   "luna-test": {
@@ -91,17 +97,17 @@ const ROLES = {
     required: ["id", "objective", "acceptance_criteria"]
   },
   "sol-implement": {
-    write: true, defaultPrompt: "implement.md", contract: "task",
+    write: true, claude: true, defaultPrompt: "implement.md", contract: "task",
     required: ["id", "objective", "editable_paths", "acceptance_criteria"]
   },
   "astra-review": {
-    write: false, defaultPrompt: "astra-review.md", contract: "review",
+    write: false, claude: true, defaultPrompt: "astra-review.md", contract: "review",
     required: ["id", "requirements", "artifact"],
     // Blind review: anything outside these keys (rationale, reasoning, discussion...) is stripped.
     allowed: ["id", "role", "requirements", "constraints", "context", "artifact", "focus", "out_of_scope"]
   },
   "astra-investigate": {
-    write: false, defaultPrompt: "astra-investigate.md", contract: "result",
+    write: false, claude: true, defaultPrompt: "astra-investigate.md", contract: "result",
     required: ["id", "objective"]
   }
 };
@@ -110,10 +116,12 @@ const VALID_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const VALID_OUTCOMES = ["accepted", "minor_rework", "major_rework", "failed", "not_applicable"];
 const VALID_USEFULNESS = ["yes", "no", "mixed"];
 const isDetached = (backend) => backend === "exec" || backend === "claude";
+// Roles the Claude gateway runs. luna-test needs a shell to run checks, which Claude workers lack.
+const CLAUDE_ROLES = Object.keys(ROLES).filter((name) => ROLES[name].claude);
 
 function resolveClaudeBin() {
   const env = { ...process.env };
-  for (const name of ["ANTHROPIC_API_KEY", ...CLAUDE_ENV_UNSET]) delete env[name];
+  for (const name of ["ANTHROPIC_API_KEY", ...claudeWorkerEnv("api").unset]) delete env[name];
   const bin = resolveWorkerBin("claude", "CLAUDE_BIN", { env });
   if (bin.ok && !supportsClaudeVersion(bin.version)) {
     return { ok: false, reason: "unsupported_version", detail: `Claude Code ${CLAUDE_MIN_VERSION} or later is required (found ${bin.version || "unknown"})` };
@@ -133,6 +141,7 @@ export function readModelSelection(files = MODEL_CONFIG_FILES) {
   const [baseFile] = files;
   if (!fs.existsSync(baseFile)) throw new Error(`model config not found: ${baseFile} (re-run the deploy script)`);
   const selection = Object.fromEntries(Object.keys(ROLES).map((name) => [name, {}]));
+  const claude = { auth: null, roles: Object.fromEntries(CLAUDE_ROLES.map((name) => [name, {}])) };
   const sources = [];
   for (const file of files.filter((f) => fs.existsSync(f))) {
     let config;
@@ -143,13 +152,25 @@ export function readModelSelection(files = MODEL_CONFIG_FILES) {
         if (values?.[key] != null) selection[roleName][key] = values[key];
       }
     }
+    if (config.claude?.auth != null) claude.auth = config.claude.auth;
+    for (const [roleName, values] of Object.entries(config.claude?.roles ?? {})) {
+      if (!CLAUDE_ROLES.includes(roleName)) throw new Error(`${file}: claude.roles has unsupported role '${roleName}' (Claude roles: ${CLAUDE_ROLES.join(", ")})`);
+      for (const key of ["model", "effort"]) {
+        if (values?.[key] != null) claude.roles[roleName][key] = values[key];
+      }
+    }
     sources.push(file);
   }
   for (const [roleName, { model, effort }] of Object.entries(selection)) {
     if (!model || typeof model !== "string") throw new Error(`no model configured for role '${roleName}' in ${sources.join(" + ")}`);
     if (!VALID_EFFORTS.includes(effort)) throw new Error(`role '${roleName}' effort must be one of: ${VALID_EFFORTS.join(", ")} (got ${JSON.stringify(effort)})`);
   }
-  return { selection, sources };
+  if (!CLAUDE_AUTH_MODES.includes(claude.auth)) throw new Error(`claude.auth must be one of: ${CLAUDE_AUTH_MODES.join(", ")} (got ${JSON.stringify(claude.auth)}) in ${sources.join(" + ")}`);
+  for (const [roleName, { model, effort }] of Object.entries(claude.roles)) {
+    if (!model || typeof model !== "string") throw new Error(`no Claude model configured for role '${roleName}' in ${sources.join(" + ")}`);
+    if (!CLAUDE_EFFORTS.includes(effort)) throw new Error(`claude role '${roleName}' effort must be one of: ${CLAUDE_EFFORTS.join(", ")} (got ${JSON.stringify(effort)})`);
+  }
+  return { selection, claude, sources };
 }
 
 function loadModelSelection() {
@@ -330,8 +351,25 @@ function ensureDirs() {
   fs.mkdirSync(TELEMETRY_DIR, { recursive: true });
 }
 
+// Error prefix; main() switches it to the gateway that was invoked.
+let gatewayName = "codex-delegate";
+
+/**
+ * Model, effort and auth mode for one Claude role: config/models.json `claude` block, then
+ * ORCH_CLAUDE_AUTH and ORCH_CLAUDE_MODEL. Output: { model, effort, auth, model_source, effort_source, auth_source }.
+ */
+function claudeSelection(roleName) {
+  const { claude } = loadModelSelection();
+  const configured = claude.roles[roleName];
+  const envModel = process.env.ORCH_CLAUDE_MODEL?.trim();
+  const envAuth = process.env.ORCH_CLAUDE_AUTH?.trim();
+  if (envAuth && !CLAUDE_AUTH_MODES.includes(envAuth)) fail(`ORCH_CLAUDE_AUTH must be one of: ${CLAUDE_AUTH_MODES.join(", ")}`);
+  return { model: envModel || configured.model, effort: configured.effort, auth: envAuth || claude.auth,
+    model_source: envModel ? "env" : "config", effort_source: "config", auth_source: envAuth ? "env" : "config" };
+}
+
 function fail(message, code = 2) {
-  console.error(`codex-delegate: ${message}`);
+  console.error(`${gatewayName}: ${message}`);
   process.exit(code);
 }
 
@@ -441,6 +479,23 @@ function packetScalar(blocks, key) {
   return block.text.replace(new RegExp(`^${key}:\\s*`), "").trim().replace(/^['\"]|['\"]$/g, "") || null;
 }
 
+/**
+ * Items of a top-level YAML list key: flow style (`key: [a, "b"]`) or block style (`- a`).
+ * Input: splitTopLevel blocks, key. Output: string[] (empty when absent). Comments are dropped.
+ */
+function packetList(blocks, key) {
+  const block = blocks.find((b) => b.key === key);
+  if (!block) return [];
+  const unquote = (v) => v.trim().replace(/^(['"])(.*)\1$/, "$2");
+  const [first, ...rest] = block.text.split(/\r?\n/);
+  const inline = first.slice(key.length + 1).replace(/\s+#.*$/, "").trim();
+  if (inline.startsWith("[")) {
+    return inline.replace(/^\[|\]$/g, "").split(",").map(unquote).filter(Boolean);
+  }
+  return rest.map((line) => line.replace(/\s+#.*$/, ""))
+    .filter((line) => /^\s*-\s+/.test(line)).map((line) => unquote(line.replace(/^\s*-\s+/, ""))).filter(Boolean);
+}
+
 function git(cwd, args) {
   const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
   // trimEnd, not trim: porcelain lines start with a meaningful space (" M file").
@@ -505,11 +560,14 @@ function verifyGit(baseline, { quiet = false, worktree = null } = {}) {
   return { ok: false, changed, now };
 }
 
-function buildPrompt(roleName, role, packetText, rolePrompt) {
+// environmentNote: generated text for backends that differ from the prompts' assumptions (Claude:
+// no shell). Null for Codex, which keeps its prompt byte-identical to the frozen goldens.
+function buildPrompt(roleName, role, packetText, rolePrompt, environmentNote = null) {
   const parts = [
     readKitFile("prompts/base.md"),
     rolePrompt,
     readKitFile(`prompts/contracts/${role.contract}.md`),
+    ...(environmentNote ? [environmentNote] : []),
     "## Task packet",
     "```yaml\n" + packetText.trim() + "\n```",
     "Finish with the YAML report above as the last thing in your reply."
@@ -613,6 +671,59 @@ function readAllRuns() {
     .sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")));
 }
 
+/**
+ * Run records from this runtime and every other local runtime (Claude Code and Codex installs),
+ * one per run id. Used where reservations must be shared across leads on one machine.
+ */
+function readRunsAllRuntimes() {
+  const seen = new Map(readAllRuns().map((r) => [r.run_id, r]));
+  for (const { dir } of localRuntimeDirs()) {
+    const runsDir = path.join(dir, "runs");
+    if (path.resolve(runsDir).toLowerCase() === path.resolve(RUNS_DIR).toLowerCase()) continue;
+    let names = [];
+    try { names = fs.readdirSync(runsDir).filter((f) => f.endsWith(".run.json")); } catch { continue; }
+    for (const name of names) {
+      try { const r = JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")); if (!seen.has(r.run_id)) seen.set(r.run_id, r); }
+      catch { /* unreadable record */ }
+    }
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Claude quota gate for one role and auth mode.
+ * Input: role, auth. Output: Promise<{ decision, snapshot, ongoing, errors }>. Exits 2 on invalid config.
+ */
+async function checkClaudeQuota(roleName, auth) {
+  let rules;
+  try { rules = loadClaudeQuotaRules(QUOTA_CONFIG_FILE, CLAUDE_ROLES); } catch (e) { fail(e.message); }
+  const runs = readRunsAllRuntimes();
+  if (auth === "api") {
+    const decision = evaluateApiGate({ role: roleName, runs, rules: rules.api });
+    return { decision, snapshot: null, ongoing: decision.ongoing, errors: [], rules };
+  }
+  const override = readRejectionOverride();
+  const { snapshot, errors } = override ? { snapshot: null, errors: [] } : await readSubscriptionSnapshot(rules.subscription);
+  const ongoing = claudeOngoing(runs, "subscription", rules.subscription);
+  const decision = evaluateSubscriptionGate({ role: roleName, snapshot, override, ongoing, rules: rules.subscription });
+  return { decision, snapshot, ongoing, errors, rules };
+}
+
+async function enforceClaudeQuota(roleName, auth, taskId) {
+  const { decision, snapshot, ongoing, errors, rules } = await checkClaudeQuota(roleName, auth);
+  for (const e of errors) console.log(`QUOTA GATE: source error — ${e}`);
+  console.log(formatClaudeGateLine(auth, decision, snapshot, ongoing));
+  const { ongoing: _omit, ...rest } = decision;
+  const record = { ...rest, backend: "claude", auth, source: snapshot?.source ?? (auth === "api" ? "run-records" : null),
+    five_hour: snapshot?.fiveHour ?? null, seven_day: snapshot?.sevenDay ?? null, ongoing_run_ids: ongoing.map((r) => r.run_id) };
+  if (!decision.allowed) {
+    appendJsonl(EVENTS_FILE, { ts: nowIso(), type: "quota_gate_blocked", task_id: taskId, role: roleName, backend: "claude", quota_gate: record });
+    console.log("QUOTA GATE: delegation skipped. Do not retry now; do the work without this worker or wait for the window to reset.");
+    process.exit(QUOTA_BLOCKED_EXIT_CODE);
+  }
+  return { record, rules };
+}
+
 function parseSince(value) {
   if (!value) return null;
   if (/^\d+$/.test(value)) return Date.now() - Number(value) * 24 * 60 * 60 * 1000;
@@ -669,6 +780,18 @@ async function enforceQuota(roleName, taskId) {
  * Input: { role?, json? }. Output: Promise<exit code> — 0 if every listed role is allowed, else 5.
  */
 async function cmdQuota(options) {
+  if (options.backend === "claude") {
+    if (options.role && !CLAUDE_ROLES.includes(options.role)) fail(`--role must be one of: ${CLAUDE_ROLES.join(", ")}`);
+    const roles = options.role ? [options.role] : CLAUDE_ROLES;
+    const results = [];
+    for (const role of roles) results.push({ role, auth: claudeSelection(role).auth, ...(await checkClaudeQuota(role, claudeSelection(role).auth)) });
+    if (options.json) console.log(JSON.stringify(results.map(({ rules, ...r }) => r), null, 2));
+    else {
+      for (const e of results[0]?.errors ?? []) console.log(`source error — ${e}`);
+      for (const r of results) console.log(formatClaudeGateLine(r.auth, r.decision, r.snapshot, r.ongoing));
+    }
+    return results.every((r) => r.decision.allowed) ? 0 : QUOTA_BLOCKED_EXIT_CODE;
+  }
   const roleNames = options.role ? [options.role] : Object.keys(ROLES);
   if (options.role && !ROLES[options.role]) fail(`--role must be one of: ${Object.keys(ROLES).join(", ")}`);
   let rules;
@@ -692,7 +815,7 @@ async function cmdRun(options) {
   const backend = options.backend || process.env.ORCH_BACKEND || "exec";
   if (!isDetached(backend) && backend !== "companion") fail(`--backend must be exec or companion for Codex, or claude (got ${backend})`);
   const useClaude = backend === "claude";
-  if (useClaude && role.write) fail("Claude delegation supports astra-review and astra-investigate");
+  if (useClaude && !role.claude) fail(`Claude delegation supports ${CLAUDE_ROLES.join(", ")}`);
   if (!options.packet) fail("--packet <file> is required");
   const packetPath = path.resolve(options.packet);
   if (!fs.existsSync(packetPath)) fail(`packet not found: ${packetPath}`);
@@ -702,18 +825,17 @@ async function cmdRun(options) {
   const rolePrompt = findRolePrompt(cwd, roleName);
   for (const warning of rolePrompt.warnings) console.log(warning);
   console.log(`ROLE PROMPT: ${rolePrompt.source} ${rolePrompt.path}`);
-  const modelSelection = useClaude
-    ? { model: process.env.ORCH_CLAUDE_MODEL?.trim() || "sonnet", effort: "high" }
-    : loadModelSelection().selection[roleName];
+  const modelSelection = useClaude ? claudeSelection(roleName) : loadModelSelection().selection[roleName];
+  const claudeAuth = useClaude ? modelSelection.auth : null;
   const projectRole = useClaude ? {} : project?.config.roles?.[roleName] || {};
   const model = projectRole.model || modelSelection.model;
   const configuredEffort = projectRole.effort || modelSelection.effort;
   const effort = options.effort || configuredEffort;
-  const modelSource = useClaude ? (process.env.ORCH_CLAUDE_MODEL?.trim() ? "env" : "default") : projectRole.model ? "project" : "config";
-  const effortSource = options.effort ? "cli" : projectRole.effort ? "project" : useClaude ? "default" : "config";
+  const modelSource = useClaude ? modelSelection.model_source : projectRole.model ? "project" : "config";
+  const effortSource = options.effort ? "cli" : projectRole.effort ? "project" : useClaude ? modelSelection.effort_source : "config";
   const allowedEfforts = useClaude ? CLAUDE_EFFORTS : VALID_EFFORTS;
   if (!allowedEfforts.includes(effort)) fail(`--effort must be one of: ${allowedEfforts.join(", ")}`);
-  if (useClaude && !/^[a-z0-9][a-z0-9._\[\]-]*$/i.test(model)) fail("invalid ORCH_CLAUDE_MODEL");
+  if (useClaude && !/^[a-z0-9][a-z0-9._\[\]-]*$/i.test(model)) fail(`invalid Claude model '${model}'`);
   let blocks = splitTopLevel(fs.readFileSync(packetPath, "utf8"));
   const missing = role.required.filter((k) => !blocks.some((b) => b.key === k));
   if (missing.length) fail(`packet is missing required keys for ${roleName}: ${missing.join(", ")}`);
@@ -732,8 +854,14 @@ async function cmdRun(options) {
     role = { ...role, allowed: [...(role.allowed || []), "project_context"] };
   }
   const packetText = blocks.map((b) => b.text).join("\n");
-  if (useClaude && !options["dry-run"] && !process.env.ANTHROPIC_API_KEY?.trim()) {
-    fail("set ANTHROPIC_API_KEY to your Claude Console API key before delegating to Claude");
+  if (useClaude && claudeAuth === "api" && !options["dry-run"] && !process.env.ANTHROPIC_API_KEY?.trim()) {
+    fail("Claude auth is 'api': set ANTHROPIC_API_KEY to your Claude Console API key, or use the default subscription auth");
+  }
+  let editRules = [];
+  if (useClaude && role.write) {
+    const generated = editRulesFor(packetList(blocks, "editable_paths"), cwd);
+    if (generated.error) fail(generated.error);
+    editRules = generated.rules;
   }
   const bin = useClaude ? (options["dry-run"] ? null : resolveClaudeBin()) : backend === "exec" ? resolveCodexBin() : null;
   if (bin && !bin.ok) fail(`${useClaude ? "claude" : "codex"} CLI ${bin.reason}: ${bin.detail}`);
@@ -742,8 +870,15 @@ async function cmdRun(options) {
   const taskIdRaw = packetScalar(blocks, "id") || "task";
   const taskId = sanitizeId(taskIdRaw);
   enforceBudget({ options, taskId, roleName });
-  // Dry runs never reach Codex, so they neither need quota nor should depend on a live read.
-  const quotaGate = useClaude || options["dry-run"] ? null : await enforceQuota(roleName, taskIdRaw);
+  // Dry runs never reach a worker, so they neither need quota nor should depend on a live read.
+  let quotaGate = null;
+  let claudeBudgetUsd = null;
+  if (useClaude && claudeAuth === "api") {
+    try { claudeBudgetUsd = loadClaudeQuotaRules(QUOTA_CONFIG_FILE, CLAUDE_ROLES).api.roles[roleName]; } catch (e) { fail(e.message); }
+  }
+  if (!options["dry-run"]) {
+    quotaGate = useClaude ? (await enforceClaudeQuota(roleName, claudeAuth, taskIdRaw)).record : await enforceQuota(roleName, taskIdRaw);
+  }
 
   const stamp = nowIso().replace(/[:.]/g, "-");
   const suffix = useClaude ? `-claude-${crypto.randomUUID().slice(0, 8)}` : "";
@@ -753,7 +888,7 @@ async function cmdRun(options) {
   const stderrFile = `${base}.stderr.txt`;
   const baselineFile = `${base}.git-baseline.json`;
   const runFile = runJsonPath(base);
-  fs.writeFileSync(promptFile, buildPrompt(roleName, role, packetText, rolePrompt.text));
+  fs.writeFileSync(promptFile, buildPrompt(roleName, role, packetText, rolePrompt.text, useClaude ? claudeEnvironmentNote(role.write) : null));
   const promptSha256 = crypto.createHash("sha256").update(fs.readFileSync(promptFile)).digest("hex");
 
   let worktree = null;
@@ -802,7 +937,7 @@ async function cmdRun(options) {
     model_source: modelSource,
     effort,
     effort_source: effortSource,
-    sandbox: role.write ? "workspace-write" : "read-only",
+    sandbox: !role.write ? "read-only" : useClaude ? "edit-rules" : "workspace-write",
     cwd,
     packet_file: packetPath,
     packet_keys_original: originalKeys,
@@ -824,6 +959,7 @@ async function cmdRun(options) {
     duration_ms: null,
     companion_path: null,
     backend,
+    ...(useClaude ? { claude_auth: claudeAuth, claude_edit_rules: editRules, claude_max_budget_usd: claudeBudgetUsd, claude_cost_usd: null } : {}),
     exec: isDetached(backend) ? { command: bin?.command ?? null, source: bin?.source ?? null, job_dir: `${base}.job`, thread_id: null,
       failures: [], warnings: 0, reasons: [] } : null,
     companion_status: null,
@@ -840,6 +976,7 @@ async function cmdRun(options) {
     touched_files: [],
     touched_files_source: null,
     worker_patch: null,
+    editable_paths: role.write && blocks.some((b) => b.key === "editable_paths") ? packetList(blocks, "editable_paths") : null,
     required_checks_count: countListItems(blocks.find((b) => b.key === "required_checks")?.text),
     project_config: project ? { file: project.file, sha256: project.sha256, schema_version: 1, applied: {
       ...projectApplied.applied, model: Boolean(projectRole.model), effort: Boolean(projectRole.effort)
@@ -864,12 +1001,16 @@ async function cmdRun(options) {
     console.log(`PROJECT: ${project.file} (+${projectApplied.applied.constraints} constraints, +${projectApplied.applied.required_checks} checks, context ${projectApplied.applied.context ? "yes" : "no"}, overrides: ${overrides})`);
   }
 
-  const execArgs = useClaude ? buildClaudeArgs({ model, effort }) : backend === "exec"
+  const workerEnv = useClaude ? claudeWorkerEnv(claudeAuth) : null;
+  const execArgs = useClaude
+    ? buildClaudeArgs({ model, effort, auth: claudeAuth, write: role.write, editRules, maxBudgetUsd: claudeBudgetUsd })
+    : backend === "exec"
     ? buildExecArgs({ cwd, model, effort, sandbox: run.sandbox, lastMessageFile: path.join(run.exec.job_dir, "last-message.txt") })
     : null;
   if (options["dry-run"]) {
     if (execArgs) {
       console.log(`DRY RUN: ${useClaude ? "claude" : "codex"} ${execArgs.join(" ")}`);
+      if (workerEnv) console.log(`DRY RUN: auth=${claudeAuth} env unset=${workerEnv.unset.join(",")} set=${Object.keys(workerEnv.set).join(",")}`);
     } else {
       console.log(`DRY RUN: node <codex-companion> ${args.join(" ")}`);
       console.log(`DRY RUN: companion=${findCompanion()}`);
@@ -885,7 +1026,7 @@ async function cmdRun(options) {
     const jobDir = run.exec.job_dir;
     const submitStarted = Date.now();
     const submitted = await submitJob({ jobDir, command: bin.command, prefixArgs: bin.prefixArgs, args: execArgs, cwd, promptFile,
-      ...(useClaude ? { format: "claude", envUnset: CLAUDE_ENV_UNSET } : {}) });
+      ...(useClaude ? { format: "claude", envUnset: workerEnv.unset, envSet: workerEnv.set } : {}) });
     run.submission_ms = Date.now() - submitStarted;
     run.job_id = `exec:${run.run_id}`;
     if (submitted.state.status === "pending") console.log("EXEC: runner start not confirmed; collect will resolve it");
@@ -982,8 +1123,11 @@ async function finalizeExecRun(run, job) {
   run.exec.failures = events.failures || [];
   run.exec.warnings = events.warnings || 0;
   run.exec.reasons = normalized.reasons || [];
-  if (run.backend === "claude") run.claude_usage = events.usage || {};
-  else run.codex_usage = events.usage || {};
+  if (run.backend === "claude") {
+    run.claude_usage = events.usage || {};
+    run.claude_cost_usd = events.cost_usd ?? null;
+    if (run.status === "failed" && events.hint) run.failure_hint = events.hint;
+  } else run.codex_usage = events.usage || {};
   run.finished_at = job.state.finished_at;
   run.collected_at = nowIso();
   const duration = job.state.started_at && job.state.finished_at
@@ -993,6 +1137,24 @@ async function finalizeExecRun(run, job) {
   saveRun(run, "run_collected");
   console.log(`TELEMETRY: ${run.run_file}`);
   return !guard.ok ? 3 : run.status === "completed" ? 0 : 1;
+}
+
+/**
+ * Touched files that match no editable_paths entry. Entries are relative to the run's cwd; a
+ * directory entry covers everything below it; * and ** globs are supported.
+ * Input: absolute touched paths, entries, cwd. Output: cwd-relative posix paths.
+ */
+function outOfScopeFiles(touched, entries, cwd) {
+  const patterns = entries.map((raw) => {
+    const entry = raw.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+    if (!/[*?]/.test(entry)) return (rel) => rel === entry || rel.startsWith(`${entry}/`);
+    const source = entry.split(/(\*\*\/?|\*|\?)/).map((part) => (part === "**/" || part === "**" ? ".*"
+      : part === "*" ? "[^/]*" : part === "?" ? "[^/]" : part.replace(/[.+^${}()|[\]\\]/g, "\\$&"))).join("");
+    const regex = new RegExp(`^${source}(/.*)?$`);
+    return (rel) => regex.test(rel);
+  });
+  return (touched || []).map((file) => path.relative(cwd, file).split(path.sep).join("/"))
+    .filter((rel) => !patterns.some((matches) => matches(rel)));
 }
 
 /**
@@ -1013,6 +1175,10 @@ function recordWorkerResult(run, output, reportedFiles = null) {
     run.touched_files_source = "companion";
   }
   if (reportedFiles) run.touched_files_reported = reportedFiles;
+  if (Array.isArray(run.editable_paths)) {
+    run.out_of_scope_files = outOfScopeFiles(run.touched_files, run.editable_paths, run.cwd);
+    if (run.out_of_scope_files.length) console.log(`SCOPE: ${run.out_of_scope_files.length} file(s) outside editable_paths: ${run.out_of_scope_files.join(", ")}`);
+  }
   run.worker_report = parseWorkerReport(output);
   if (run.status === "failed" && looksLikeQuotaStop(output)) run.failure_hint = "quota";
 }
@@ -1249,16 +1415,22 @@ function cmdConfigExplain(options, positionals) {
   if (!roleName || !ROLES[roleName]) fail(`config --explain <role> [--cwd <dir>] [--json]; role must be one of: ${Object.keys(ROLES).join(", ")}`);
   const cwd = path.resolve(options.cwd || process.cwd());
   if (!fs.existsSync(cwd)) fail(`--cwd does not exist: ${cwd}`);
+  const useClaude = options.backend === "claude";
+  if (useClaude && !CLAUDE_ROLES.includes(roleName)) fail(`Claude delegation supports ${CLAUDE_ROLES.join(", ")}`);
   const project = findProjectConfig(cwd);
   const rolePrompt = findRolePrompt(cwd, roleName);
-  const configured = loadModelSelection().selection[roleName];
-  const projectRole = project?.config.roles?.[roleName] || {};
+  const claude = useClaude ? claudeSelection(roleName) : null;
+  const configured = claude || loadModelSelection().selection[roleName];
+  // Project model overrides hold Codex model ids, so they apply to Codex workers only (as in run).
+  const projectRole = useClaude ? {} : project?.config.roles?.[roleName] || {};
   const result = {
     role: roleName,
+    backend: useClaude ? "claude" : "codex",
     model: projectRole.model || configured.model,
-    model_source: projectRole.model ? "project" : "config",
+    model_source: projectRole.model ? "project" : claude?.model_source || "config",
     effort: projectRole.effort || configured.effort,
-    effort_source: projectRole.effort ? "project" : "config",
+    effort_source: projectRole.effort ? "project" : claude?.effort_source || "config",
+    ...(claude ? { auth: claude.auth, auth_source: claude.auth_source } : {}),
     project_file: project?.file || "none",
     constraints: roleName.startsWith("astra-") ? [] : (project?.config.constraints || []),
     required_checks: roleName.startsWith("astra-") ? [] : (project?.config.required_checks || []),
@@ -1270,6 +1442,7 @@ function cmdConfigExplain(options, positionals) {
   if (options.json) console.log(JSON.stringify(result, null, 2));
   else {
     console.log(`role: ${result.role}`);
+    console.log(`backend: ${result.backend}`);
     console.log(`model: ${result.model} (source: ${result.model_source})`);
     console.log(`effort: ${result.effort} (source: ${result.effort_source})`);
     console.log(`project file: ${result.project_file}`);
@@ -1586,6 +1759,11 @@ function cmdMetrics(options) {
         totals[key] += Number(run.codex_usage?.[key]) || 0;
       return totals;
     }, { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 }),
+    claude_usage: runs.reduce((totals, run) => {
+      for (const key of Object.keys(totals)) totals[key] += Number(run.claude_usage?.[key]) || 0;
+      return totals;
+    }, { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 }),
+    claude_cost_usd: Number(runs.reduce((sum, run) => sum + (Number(run.claude_cost_usd) || 0), 0).toFixed(4)),
     completed_total: completed.length,
     assessed_total: assessed.length,
     assessment_coverage_pct: pct(assessed.length, runs.length),
@@ -1639,7 +1817,9 @@ function cmdMetrics(options) {
 export async function main(backend) {
   const [command, ...rest] = process.argv.slice(2);
   const { options, positionals } = parseArgs(rest);
-  if (backend && ["run", "which"].includes(command)) options.backend = backend;
+  // Other commands act on run records, which carry their own backend.
+  if (backend && ["run", "which", "models", "config", "quota"].includes(command)) options.backend = backend;
+  if (backend === "claude") gatewayName = "claude-delegate";
 
   switch (command) {
     case "run":
@@ -1670,10 +1850,21 @@ export async function main(backend) {
         process.exit(bin.ok || companion ? 0 : 2);
       }
     case "models": {
-      const { selection, sources } = loadModelSelection();
-      if (options.json) console.log(JSON.stringify({ sources, roles: selection }, null, 2));
+      let { selection, sources } = loadModelSelection();
+      let auth = null;
+      if (options.backend === "claude") {
+        selection = Object.fromEntries(CLAUDE_ROLES.map((roleName) => {
+          const claude = claudeSelection(roleName);
+          auth = claude.auth;
+          return [roleName, { model: claude.model, effort: claude.effort }];
+        }));
+        if (process.env.ORCH_CLAUDE_MODEL?.trim()) sources = [...sources, "ORCH_CLAUDE_MODEL"];
+        if (process.env.ORCH_CLAUDE_AUTH?.trim()) sources = [...sources, "ORCH_CLAUDE_AUTH"];
+      }
+      if (options.json) console.log(JSON.stringify({ sources, ...(auth ? { auth } : {}), roles: selection }, null, 2));
       else {
         console.log(`config: ${sources.join(" + ")}`);
+        if (auth) console.log(`auth: ${auth}`);
         for (const [roleName, { model, effort }] of Object.entries(selection)) console.log(`${roleName}\t${model}\t${effort}`);
       }
       process.exit(0);

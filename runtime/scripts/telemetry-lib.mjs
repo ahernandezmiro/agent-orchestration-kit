@@ -167,7 +167,8 @@ export function projectOf(run) {
 
 const GROUPERS = {
   role: (r) => [r.role || "unknown"],
-  backend: (r) => [r.backend || "companion"],
+  // Claude runs split by auth mode; records from before auth modes existed were API-key runs.
+  backend: (r) => [r.backend === "claude" ? `claude-${r.claude_auth ?? "api"}` : r.backend || "companion"],
   project: (r) => [projectOf(r)],
   task_type: (r) => [r.task_type || "unknown"],
   duration: (r) => [durationBucket(workerDuration(r))],

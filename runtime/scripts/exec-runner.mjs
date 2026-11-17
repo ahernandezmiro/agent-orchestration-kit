@@ -57,6 +57,7 @@ async function run() {
   try {
     const env = { ...process.env };
     for (const name of spec.env_unset ?? []) delete env[name];
+    Object.assign(env, spec.env_set ?? {});
     child = spawn(spec.command, [...(spec.prefixArgs || []), ...spec.args], {
       cwd: spec.cwd, env, stdio: [promptFd, eventsFd, stderrFd], shell: false,
       windowsHide: true, detached: false

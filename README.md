@@ -4,7 +4,7 @@ Start in Claude Code or Codex. The model selected in that session is the **lead*
 
 | Client | Lead entry point | Worker gateway | Worker capabilities |
 |---|---|---|---|
-| Claude Code | Start a new session after installing the kit rules | `scripts/claude-delegate.mjs` | Read-only independent review and investigation. Requires Claude Code 2.1.286+ and a Claude Console API key |
+| Claude Code | Start a new session after installing the kit rules | `scripts/claude-delegate.mjs` | Implementation (file edits, no shell), independent review, and investigation. Requires Claude Code 2.1.286+. Uses your Claude Code login and quota gate; a Console API key is optional |
 | Codex | Invoke `$orchestration-kit` in a new session | `scripts/codex-delegate.mjs` | Implementation, tests, independent review, and investigation. Uses the Codex CLI login and quota gate |
 
 ## Install
@@ -85,7 +85,7 @@ An override replaces the whole role prompt, with no merging. It must be non-empt
 
 ## Codex quota gate
 
-Every live Codex delegation checks quota before starting. The gateway exits with code **5** when quota is insufficient or unknown. Claude workers use Claude Console billing and do not reserve Codex quota.
+Every live Codex delegation checks quota before starting. The gateway exits with code **5** when quota is insufficient or unknown. Claude workers have their own gate (see [Claude workers](#claude-workers)) and do not reserve Codex quota.
 
 How it works:
 1. It reads the 5h window (`window_minutes: 300`) from a short-lived `codex app-server` (`account/rateLimits/read`, the numbers `/status` shows; about 2–3 s). If that fails, it uses the newest `rate_limits` snapshot in `~/.codex/sessions` rollouts, as long as that window hasn't reset. If neither gives a value, the run is blocked.
@@ -106,9 +106,29 @@ Example: 60% remaining with one Astra and one Luna in flight leaves 60 − 25 �
 - Environment variables: `CODEX_BIN` sets the codex binary. `CODEX_QUOTA_SNAPSHOT=<file.json>` (`{usedPercent, windowMinutes, resetsAt}`) replaces the live read; the tests use it.
 - Tests: `node --test claude/global/test/quota-gate.test.mjs`.
 
+## Claude workers
+
+`claude-delegate.mjs` runs Claude Code in print mode for `luna-implement`, `sol-implement`, `astra-review` and `astra-investigate`. `luna-test` stays on Codex because it needs a shell. Install Claude Code 2.1.286 or later; on Windows set `CLAUDE_BIN` to the native binary if `claude.exe` is not on PATH.
+
+**Auth.** By default a worker uses your own Claude Code login (`claude.auth: "subscription"` in `config/models.json`), the same way Codex workers use your Codex login. Set `ORCH_CLAUDE_AUTH=api` (or `claude.auth: "api"`) to use a Claude Console key from `ANTHROPIC_API_KEY` instead; the run then uses `--bare`. Anthropic's terms allow your own subscription for your own work; offering or routing other people's subscription logins is not allowed, so a redistributed or hosted setup must use API keys. [Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
+
+**Isolation.** Every run uses `--restricted --strict-mcp-config --disable-slash-commands`, turns off hooks and auto memory through `--settings`, removes the `Agent` tool and MCP tools, and sets `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, so your CLAUDE.md files, plugins, skills and MCP servers stay out of the worker. Provider and proxy variables (`ANTHROPIC_BASE_URL`, Bedrock/Vertex/Foundry) are never passed on.
+
+**Edits.** Implementation roles get `Read, Glob, Grep, Edit, Write` and no shell. Each `editable_paths` entry becomes a permission rule (`src/` becomes `Edit(./src/**)`), so the CLI denies any other edit. Entries must be relative to `--cwd`, without `..`, whitespace, commas or parentheses; an empty list stops the run. The prompt gets a generated note that the worker has no shell and must report checks as `not-run`: the lead runs them. After every write run (either gateway), files outside `editable_paths` are listed as `out_of_scope_files` and printed as `SCOPE: …`.
+
+**Models.** `config/models.json` → `claude.roles` sets model and effort per role (defaults: `sonnet`, `opus` for `sol-implement`). `ORCH_CLAUDE_MODEL` overrides the model for every role; `--effort` overrides one run. `models`, `config --explain` and `quota` on the Claude gateway report the Claude settings.
+
+**Quota gate.** Configured in `config/quota.json` → `claude`; blocked runs exit **5** like Codex runs.
+- Subscription: the run is allowed only if `(100 − 5-hour used%) − reservations of Claude subscription runs in flight − the role's percent > 0` and the 7-day window has more than `seven_day_min_remaining`% left. Usage comes from `api.anthropic.com/api/oauth/usage`, read with the login token in Claude Code's credentials file (`$CLAUDE_CONFIG_DIR/.credentials.json`, default `~/.claude/.credentials.json`). The token is used for that one request and never written, logged or refreshed. This endpoint is undocumented; if it fails (expired token, keychain storage, network) the run is blocked. A recent Claude Code transcript that recorded a `usage_limit_reached` rejection blocks until its reset time.
+- API key: each run is capped with `--max-budget-usd` at its role's amount, and the run is allowed only if `budget_usd − recorded spend of API-key runs in the window − reservations in flight − the role's amount ≥ 0`. Spend is Claude Code's own `total_cost_usd` estimate, not your bill.
+- Reservations are read from both local runtimes (`~/.claude/orchestration` and `$CODEX_HOME/orchestration`), so a Claude Code lead and a Codex lead share them.
+- `CLAUDE_QUOTA_SNAPSHOT=<file.json>` (`{fiveHour: {usedPercent, resetsAt}, sevenDay: {…}}`) replaces the live read; the tests use it.
+- Run records gain `claude_auth`, `claude_cost_usd`, `claude_usage` and, for write runs, `claude_edit_rules`. `metrics --by backend` splits Claude runs into `claude-subscription` and `claude-api`.
+- Tests: `node --test claude/global/test/claude-quota.test.mjs claude/global/test/claude-worker.test.mjs`.
+
 ## Exporting telemetry for analysis
 
-`pack-telemetry.mjs` exports data from the runtime containing the script. Both gateways support `metrics --by backend` and record worker usage under the corresponding provider field.
+`pack-telemetry.mjs` exports data from every local runtime that has some, whichever lead installed it: `~/.claude/orchestration` and `$CODEX_HOME/orchestration` (default `~/.codex`). Both gateways support `metrics --by backend` and record worker usage under the corresponding provider field.
 
 ```bash
 node "<runtime>/scripts/pack-telemetry.mjs"
@@ -116,7 +136,7 @@ node "<runtime>/scripts/pack-telemetry.mjs"
 
 - Repeat `--source <dir>` to choose multiple runtimes for one archive.
 - On Windows or WSL, `--all-hosts` adds default Claude Code and Codex runtimes on the other side. On Windows this may start stopped WSL distros. Use `--source` for custom paths.
-- **What goes in:** `manifest.json` (sources, file/run/event counts, options), then one folder per source (`<host>-<platform>-<user>/`) with `runs/`, `telemetry/`, `deployed.json` and `config/*.json`. Kit files (scripts, prompts, templates) are not included.
+- **What goes in:** `manifest.json` (sources, file/run/event counts, options), then one folder per source (`<host>-<platform>-<user>-<claude|codex>/`) with `runs/`, `telemetry/`, `deployed.json` and `config/*.json`. Kit files (scripts, prompts, templates) are not included.
 - **Trimming:** `--exclude-raw` drops `*.prompt.md`, `*.stdout.txt` and `*.stderr.txt`, which can hold project code; run records and events keep every metric. `--exclude-validation` drops `runs/_validation/` and `telemetry/_validation/`.
 - **Output:** `./orchestration-telemetry-<host>-<timestamp>.zip`, or `--out <file.zip>`. `--dry-run` prints the summary without writing. Zips are gitignored.
 - Tests: `node --test claude/global/test/pack-telemetry.test.mjs`.

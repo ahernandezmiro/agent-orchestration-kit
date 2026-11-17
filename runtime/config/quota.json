@@ -8,5 +8,28 @@
     "sol-implement": 15,
     "luna-implement": 10,
     "luna-test": 10
+  },
+  "claude": {
+    "_description": "Claude quota gate read by claude-delegate.mjs. subscription (default auth): a run is allowed only if (100 - 5-hour used%) - reservations of ongoing subscription runs - this role's percent > 0 and the 7-day window has more than seven_day_min_remaining% left. api: allowed only if budget_usd - recorded spend of API-key runs in the window - ongoing reservations - this role's amount >= 0; each API-key run is also capped with --max-budget-usd at its role's amount.",
+    "subscription": {
+      "read_timeout_ms": 10000,
+      "seven_day_min_remaining": 10,
+      "roles": {
+        "astra-review": 15,
+        "astra-investigate": 15,
+        "luna-implement": 10,
+        "sol-implement": 20
+      }
+    },
+    "api": {
+      "window_minutes": 1440,
+      "budget_usd": 10,
+      "roles": {
+        "astra-review": 1,
+        "astra-investigate": 1.5,
+        "luna-implement": 2,
+        "sol-implement": 3
+      }
+    }
   }
 }
