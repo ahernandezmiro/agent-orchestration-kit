@@ -1,9 +1,9 @@
 # orchestration-kit
 
-<!-- Repo overview for the Claude Opus + Codex (Luna/Sol/Astra) orchestration kit.
+<!-- Repo overview for the lead + Codex workers (Luna/Sol/Astra) orchestration kit.
      Author: maintained with Claude Code for the frontier-model orchestration setup. -->
 
-This repo is the source of truth for the multi-model orchestration setup: Claude Code (Opus) orchestrates, and Codex workers (Luna, Sol, Astra) are reached through `codex-delegate.mjs`. You edit, commit and push it here, then pull and run the deploy script on each machine (Windows hosts, WSL distros, other devices).
+This repo is the source of truth for the multi-model orchestration setup: the model you select in Claude Code (the lead) orchestrates, and Codex workers (Luna, Sol, Astra) are reached through `codex-delegate.mjs`. You edit, commit and push it here, then pull and run the deploy script on each machine (Windows hosts, WSL distros, other devices). Tested with Claude Opus 5.5 and Claude Fable 5.2 as lead.
 
 The kit itself is documented in [claude/GLOBAL_INSTALL.md](claude/GLOBAL_INSTALL.md) (architecture, validation, gotchas) and [shared/README.md](shared/README.md) (policy).
 
@@ -18,14 +18,15 @@ The kit itself is documented in [claude/GLOBAL_INSTALL.md](claude/GLOBAL_INSTALL
 | `claude/global/scripts/quota-gate.mjs` | Codex quota read + gate, used by the wrapper | `~/.claude/orchestration/scripts/` |
 | `claude/global/scripts/pack-telemetry.mjs` | zips runs + telemetry for offline analysis | `~/.claude/orchestration/scripts/` |
 | `claude/global/scripts/telemetry-lib.mjs` | schema-2 attribution: working-tree snapshots, worker/post-worker diff stats, report parsing, `metrics --by` | same |
-| `claude/global/scripts/opus-usage.mjs` | offline: Claude tokens spent between each worker result and its assessment, from local session transcripts | same |
+| `claude/global/scripts/lead-usage.mjs` | offline: the lead's tokens spent between each worker result and its assessment, and which models led, from local session transcripts | same |
 | `claude/global/scripts/exec-backend.mjs`, `exec-runner.mjs` | default backend: shell-free `codex exec` resolution and argv, detached job runner with atomic state, event normalization, verified cancel | same |
 | `claude/global/templates/project.json` | example per-project defaults (`<repo>/.orchestration/project.json`) | `~/.claude/orchestration/templates/` |
 | `claude/global/config/models.local.json` | optional per-machine override (gitignored) | same, if present |
 | `claude/global/agents/*.md` | `luna-worker`, `astra-reviewer` subagents | `~/.claude/agents/` |
 | `codex/prompts/` | worker prompt fragments: `base.md`, `roles/*.md` (overridable defaults), `contracts/*.md` | `~/.claude/orchestration/codex/prompts/` |
-| `claude/global/CLAUDE.orchestration.md` | orchestrator instructions | `~/.claude/orchestration/claude/`, imported by a 3-line managed block in `~/.claude/CLAUDE.md` |
-| `claude/global/scripts/managed-block.mjs` | id-scoped `<!-- BEGIN/END orchestration-kit:<id> -->` blocks; the installer refuses malformed markers and writes only on change | `~/.claude/orchestration/scripts/` |
+| `claude/global/CLAUDE.orchestration.md` | the lead's instructions | generated, together with `shared/ROUTING_POLICY.md` and `claude/CLAUDE.md`, into `~/.claude/rules/orchestration-kit.md` |
+| `claude/global/scripts/rules-file.mjs` | builds that rules file (one flat file, no `@` imports) | `~/.claude/orchestration/scripts/` |
+| `claude/global/scripts/managed-block.mjs` | id-scoped `<!-- BEGIN/END orchestration-kit:<id> -->` blocks; now used only to remove the block older kit versions put in `~/.claude/CLAUDE.md` | `~/.claude/orchestration/scripts/` |
 | `claude/global/settings.permissions.json` | allow/ask rules | merged into `~/.claude/settings.json` |
 | `claude/global/install.mjs` | cross-platform installer | — |
 | `claude/global/test/` | validation packets, playground creator, prompt-freeze guard + golden prompts, quota-gate and packer tests | — |
@@ -50,7 +51,7 @@ git clone <remote> ~/dev/orchestration-kit && cd ~/dev/orchestration-kit
 ./deploy.sh
 ```
 
-To update later, run `git pull` and then the deploy script again. Start a new Claude Code session afterwards, because agents and `CLAUDE.md` only load at session start.
+To update later, run `git pull` and then the deploy script again. Start a new Claude Code session afterwards, because agents and rules files only load at session start.
 
 What a deploy does:
 1. Finds Node 18 or newer. `deploy.sh` also checks `$NODE_BIN_DIR`, pnpm, Volta and nvm, because non-interactive WSL shells often only see an old `/usr/bin/node`.
@@ -59,8 +60,9 @@ What a deploy does:
    - preflight checks;
    - deletes and re-copies the kit-managed folders (`shared, codex, claude, scripts, templates, config`), so removed files disappear too;
    - installs the agents;
-   - adds or replaces the `orchestration-kit:claude-md` block in `CLAUDE.md` (one `@` import line; an old inlined `frontier-orchestration` block is migrated, and malformed markers stop the install before anything changes);
-   - merges the permission rules (`CLAUDE.md` and `settings.json` are written, and backed up first, only when they change). No `AGENTS.md` is ever written;
+   - writes the lead's instructions to `~/.claude/rules/orchestration-kit.md`, a file the kit owns (a hand-edited copy is backed up to `~/.claude/orchestration/backups/` first);
+   - removes the block that older kit versions put in `~/.claude/CLAUDE.md`, once, with a backup. After that it never writes `CLAUDE.md`. If the block's markers are malformed it leaves the file alone, finishes the install and exits non-zero so you can remove the block by hand;
+   - merges the permission rules (`settings.json` is written, and backed up first, only when it changes). No `AGENTS.md` is ever written;
    - writes `~/.claude/orchestration/deployed.json` (commit, dirty flag, host, effective models).
 4. Prints the effective model selection.
 

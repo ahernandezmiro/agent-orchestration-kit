@@ -211,7 +211,7 @@ test("foreground run records touched files, patch, report; assess measures post-
     assert.ok(run.worker_duration_ms >= 0);
     assert.ok(run.dirty_before.includes("notes.md"), "pre-existing dirt recorded but not attributed");
 
-    // Opus fixes one worker line and edits an unrelated file.
+    // The lead fixes one worker line and edits an unrelated file.
     fs.writeFileSync(path.join(repo, "src", "a.js"), "one\ntwo\nthree\nworker1\nfixed\n");
     fs.writeFileSync(path.join(repo, "notes.md"), "unrelated\n");
     const a = s.cli("assess", run.run_id, "--outcome", "minor_rework", "--useful", "yes", "--cause", "model_error,test_gap", "--verified", "tests");

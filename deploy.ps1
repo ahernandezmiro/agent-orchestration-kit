@@ -7,8 +7,8 @@
 
   Steps: verify Node >= 18 -> prompt-freeze check (prompts must stay byte-identical during the
   evaluation period) -> claude/global/install.mjs, which replaces every kit-managed file under
-  ~/.claude/orchestration, the two subagents, the managed CLAUDE.md block and the permission
-  rules (backing up CLAUDE.md and settings.json first). runs/ and telemetry/ are never touched.
+  ~/.claude/orchestration, the two subagents, the lead's rules file (~/.claude/rules/orchestration-kit.md) and the permission
+  rules (backing up settings.json first; CLAUDE.md is only touched to remove an old kit block). runs/ and telemetry/ are never touched.
   Fresh installs and updates use the same path. Start a new Claude Code session afterwards.
 
 .PARAMETER Check
@@ -92,5 +92,5 @@ Invoke-NodeStep -Label 'install' -NodeArgs $installArgs
 if (-not $DryRun) {
   # USERPROFILE, not $HOME: it is what Node's os.homedir() (and so install.mjs) resolves on Windows.
   Invoke-NodeStep -Label 'effective model selection' -NodeArgs @((Join-Path $env:USERPROFILE '.claude\orchestration\scripts\codex-delegate.mjs'), 'models')
-  Write-Host 'Deployed. Start a NEW Claude Code session so the agents and CLAUDE.md block reload.'
+  Write-Host 'Deployed. Start a NEW Claude Code session so the agents and rules file reload.'
 }

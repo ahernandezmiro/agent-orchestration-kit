@@ -4,7 +4,7 @@ You are Claude Code. Configure this project/workspace to use the orchestration p
 
 ## Goal
 
-Make Opus 5.5 the primary orchestrator while using installed Codex integration plugins to delegate bounded work to GPT-6 Luna and independent review/alternative-design work to GPT-6 Astra.
+Make the model selected for the session (the lead) the primary orchestrator while using installed Codex integration plugins to delegate bounded work to GPT-6 Luna and independent review/alternative-design work to GPT-6 Astra.
 
 ## Read first
 
@@ -35,10 +35,10 @@ Make Opus 5.5 the primary orchestrator while using installed Codex integration p
 ## Desired behavior
 
 When the user gives a substantial task:
-- Opus determines whether it needs design/spec work first.
-- Opus writes/updates a task packet when delegation is useful.
+- The lead determines whether it needs design/spec work first.
+- The lead writes/updates a task packet when delegation is useful.
 - Routine bounded implementation/test tasks go to Luna.
 - Important design/architecture/creative-pipeline work may get an Astra independent review.
-- Opus synthesizes and owns the final answer/plan.
+- The lead synthesizes and owns the final answer/plan.
 
 Do not delegate trivial work merely to satisfy the architecture.

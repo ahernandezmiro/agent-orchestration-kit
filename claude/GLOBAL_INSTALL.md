@@ -9,8 +9,8 @@ This file adds to `BOOTSTRAP.md`; it doesn't replace it. `BOOTSTRAP.md` says *wh
 ## 1. Architecture
 
 ```
-you ──► Claude Code (Opus, orchestrator)
-          │  reads ~/.claude/CLAUDE.md  (3-line managed block → @imports CLAUDE.orchestration.md → routing policy + identity)
+you ──► Claude Code (the lead: whichever model you selected)
+          │  reads ~/.claude/rules/orchestration-kit.md  (kit-owned, generated: kit instructions + routing policy + identity)
           │  writes task / review packets  (<project>/.orchestration/tasks/*.yaml)
           ▼
         subagent luna-worker / astra-reviewer   (~/.claude/agents, haiku, Bash only, no conversation context)
@@ -54,7 +54,13 @@ Use the deploy script at the repo root. It checks Node, runs the prompt-freeze g
 ```
 On Linux/WSL: `./deploy.sh --check`, then `./deploy.sh`.
 
-Then **start a new Claude Code session**. Agents and `CLAUDE.md` only load at session start. Run the validation in section 6.
+Then **start a new Claude Code session**. Agents and rules files only load at session start. Run the validation in section 6.
+
+The installer never writes `~/.claude/CLAUDE.md`, except to remove, once and with a backup, the block that older kit versions put there. If that block's markers are malformed, the file is left alone and the install exits non-zero after doing everything else; remove the block by hand. A rules file you edited by hand is copied to `~/.claude/orchestration/backups/` before it is overwritten. To do the rules-file step by hand, run this from the kit root and save the output as `~/.claude/rules/orchestration-kit.md`:
+
+```bash
+node --input-type=module -e "import { buildRulesFile } from './claude/global/scripts/rules-file.mjs'; process.stdout.write(buildRulesFile({ kitRoot: process.cwd(), commit: null }))"
+```
 
 Other modes (`deploy.ps1` switch / `deploy.sh` flag):
 - `-DryRun` / `--dry-run` shows what would change.
@@ -99,10 +105,10 @@ Source files in the kit (`claude/global/`), with where the installer copies them
 | `agents/luna-worker.md` | `~/.claude/agents/` | forwards a task packet to `luna-implement` / `luna-test` / `sol-implement` |
 | `agents/astra-reviewer.md` | `~/.claude/agents/` | forwards a review packet to `astra-review` / `astra-investigate` |
 | `templates/task-packet.yaml`, `review-packet.yaml` | `~/.claude/orchestration/templates/` | packet starting points |
-| `CLAUDE.orchestration.md` | `~/.claude/orchestration/claude/`, imported by the `orchestration-kit:claude-md` block in `~/.claude/CLAUDE.md` | routing rules, role table, workflow, blind-review and git rules |
-| `scripts/managed-block.mjs` | `~/.claude/orchestration/scripts/` | id-scoped marker blocks; refuses unmatched, duplicate or nested markers |
+| `CLAUDE.orchestration.md` | generated into `~/.claude/rules/orchestration-kit.md` by `scripts/rules-file.mjs`, followed by the routing policy and identity rules | role table, workflow, observability, blind-review and git rules |
+| `scripts/managed-block.mjs` | `~/.claude/orchestration/scripts/` | id-scoped marker blocks; used only to remove the old `CLAUDE.md` block; refuses unmatched, duplicate or nested markers |
 | `settings.permissions.json` | merged into `~/.claude/settings.json` | allow the wrapper; *ask* before `git push/merge/rebase/reset --hard/remote/filter-*` and `commit --amend` |
-| `../../shared`, `../../codex`, `../*.md` | `~/.claude/orchestration/{shared,codex,claude}/` | `codex/prompts/` is what the wrapper assembles into worker prompts; the rest is policy that CLAUDE.md imports |
+| `../../shared`, `../../codex`, `../*.md` | `~/.claude/orchestration/{shared,codex,claude}/` | `codex/prompts/` is what the wrapper assembles into worker prompts; the rest is policy the lead reads on demand (the routing policy and identity rules are also copied into the rules file) |
 
 Design decisions:
 - **Blindness is enforced by structure, not convention.** The subagents start with no conversation context, and the wrapper sends only allowlisted packet keys (`id, role, requirements, constraints, context, artifact, focus, out_of_scope`) for `astra-review`, printing `BLIND REVIEW: stripped …` for anything else.
@@ -239,7 +245,8 @@ Manual (Claude can't or shouldn't do these):
 
 Gotchas seen on the first machine:
 - **`npm` was not on the PATH Codex's shell uses**, so `npm test` failed inside Codex. Put Node's folder on PATH, or write `node --test`-style commands in `required_checks`.
-- **Agents and `CLAUDE.md` load only at session start.** After install, open a new session.
+- **Agents and rules files load only at session start.** After install, open a new session.
+- **Check that the rules file loads.** In a new session on a model other than the one you normally lead with: confirm `~/.claude/CLAUDE.md` no longer contains an `orchestration-kit:claude-md` block, ask the session to quote rule 6 of the routing policy, and check that its closing `Orchestration:` line says "lead" and names no model. If a Claude Code surface doesn't load `~/.claude/rules/`, the instructions are silently absent there.
 - **The companion's broker process keeps the target repo as its working directory** until the Claude session ends, so on Windows that folder can't be deleted mid-session (`Device or resource busy`). `create-playground.mjs` accepts an existing empty folder for this reason.
 - The Bash tool has a 10-minute limit. Use `--background` for anything that might take longer.
 - Read-only Codex can still *read* files anywhere on disk. Blind review keeps Astra blind by limiting what is sent, not by isolating the filesystem.

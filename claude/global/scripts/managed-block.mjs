@@ -1,4 +1,5 @@
-// Id-scoped managed blocks for instruction files the kit must edit (CLAUDE.md today).
+// Id-scoped managed blocks for instruction files the kit must edit. Today that is only the removal of
+// the block older kit versions put in ~/.claude/CLAUDE.md; the lead's instructions live in a rules file.
 // Pure string functions; callers do the file I/O. See docs/superpowers/specs/2026-10-22-role-prompts-and-managed-blocks-design.md §3.
 
 const LEGACY_MARKERS = {

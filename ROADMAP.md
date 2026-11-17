@@ -91,4 +91,5 @@ Done when: a project file adds a required check that shows up in the prompt and 
   - astra-investigate `54df5ccaeb8a`
 
   Analyse the runs before and after this change separately, using `prompt_sha256`, and exclude runs whose `role_prompt.source` isn't `default`. Deploy on every machine in the same sitting.
+- **Lead instructions reworded and moved to a rules file (2026-11-17).** Worker prompts unchanged (still prompt version 2). Rules-file sha256 prefix: `bad474e3bbc9`. Spec: `docs/superpowers/specs/2026-11-17-lead-neutral-global-instructions-design.md`.
 - Target: about 50 new production runs on both machines. Then repack, re-analyse with `metrics`, and decide on plugin packaging and the config waterfall from the evidence.

@@ -34,7 +34,7 @@
 // the worker starts (baseline_tree) and when its result is finalized (worker_tree). The worker's
 // files and patch size come from the diff between the two, so dirty trees and foreground runs are
 // covered. `assess` diffs worker_tree against the current tree, limited to those files, to measure
-// what Opus changed afterwards (post_worker).
+// what the lead changed afterwards (post_worker).
 //
 // New run options:
 //   --reason <why this delegation was selected>
@@ -1402,7 +1402,7 @@ function measurePostWorker(run, assessedAt) {
     ...stat,
     rewrite_ratio: workerLines ? Number((churn(stat) / workerLines).toFixed(2)) : null,
     overlapping_runs: overlapping,
-    // Changes by another worker in the same files can't be told apart from Opus's corrections.
+    // Changes by another worker in the same files can't be told apart from the lead's corrections.
     attribution: overlapping.length ? "uncertain" : "clean"
   };
 }

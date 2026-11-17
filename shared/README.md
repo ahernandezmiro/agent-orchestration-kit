@@ -1,6 +1,6 @@
 # Frontier Model Orchestration Kit
 
-Purpose: configure a subscription-backed multi-model workflow where Claude Code (Opus 5.5) is the primary orchestrator, GPT-6 Luna is the default implementation/test worker, and GPT-6 Astra is an independent reviewer / alternative-design specialist.
+Purpose: configure a subscription-backed multi-model workflow where the model you select in Claude Code (the lead) is the primary orchestrator, GPT-6 Luna is the default implementation/test worker, and GPT-6 Astra is an independent reviewer / alternative-design specialist.
 
 Assumptions:
 - Claude Desktop / Claude Code is already installed and authenticated.
@@ -15,10 +15,10 @@ Top-level folders:
 
 Recommended operating model:
 
-1. You interact primarily with Claude Code / Opus 5.5.
-2. Opus owns requirements, architecture, decomposition, synthesis, and final sign-off.
-3. Opus delegates bounded implementation and test work to Luna through the installed Codex integration.
-4. Opus asks Astra for independent review / alternative proposals on important design, architecture, 2D, 3D, and video-pipeline work.
+1. You interact primarily with Claude Code. The model you select there is the lead. Tested with Claude Opus 5.5 and Claude Fable 5.2 as lead.
+2. The lead owns requirements, architecture, decomposition, synthesis, and final sign-off.
+3. The lead delegates bounded implementation and test work to Luna through the installed Codex integration.
+4. The lead asks Astra for independent review / alternative proposals on important design, architecture, 2D, 3D, and video-pipeline work.
 5. Reviewers should be kept blind to the producing model's hidden reasoning; give them requirements + artifact/output only.
 6. A model that produced an artifact should not be the only model that reviews it when the change is important.
 

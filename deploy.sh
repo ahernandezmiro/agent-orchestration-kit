@@ -6,8 +6,8 @@
 # distro's old /usr/bin/node, so user-level installs are probed: $NODE_BIN_DIR, pnpm, Volta,
 # nvm) -> prompt-freeze check (prompts must stay
 # byte-identical during the evaluation period) -> claude/global/install.mjs, which replaces every
-# kit-managed file under ~/.claude/orchestration, the two subagents, the managed CLAUDE.md block
-# and the permission rules (backing up CLAUDE.md and settings.json first). runs/ and telemetry/
+# kit-managed file under ~/.claude/orchestration, the two subagents, the lead's rules file (~/.claude/rules/orchestration-kit.md)
+# and the permission rules (backing up settings.json first; CLAUDE.md is only touched to remove an old kit block). runs/ and telemetry/
 # are never touched. Fresh installs and updates use the same path.
 #
 #   ./deploy.sh                        install / update
@@ -111,5 +111,5 @@ node_step "install" "${install_args[@]}"
 
 if ! $dry_run; then
   node_step "effective model selection" "$HOME/.claude/orchestration/scripts/codex-delegate.mjs" models
-  echo "Deployed. Start a NEW Claude Code session so the agents and CLAUDE.md block reload."
+  echo "Deployed. Start a NEW Claude Code session so the agents and rules file reload."
 fi

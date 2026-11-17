@@ -59,15 +59,15 @@ If your existing Codex/Claude permissions are broader, tighten them manually or 
 Create a disposable repo and run these tests:
 
 A. Claude -> Luna implementation delegation
-- Opus creates a task packet.
+- The lead creates a task packet.
 - Luna implements a small bounded function + tests.
-- Opus reviews result.
+- The lead reviews result.
 
 B. Claude -> Astra independent design review
-- Opus creates a small architecture proposal.
+- The lead creates a small architecture proposal.
 - Astra receives only requirements + final proposal.
 - Astra critiques it.
-- Opus synthesizes revisions.
+- The lead synthesizes revisions.
 
 C. Background/resume
 - Launch one longer Codex task in background if supported by your installed plugin.
