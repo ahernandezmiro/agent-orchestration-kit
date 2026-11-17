@@ -167,6 +167,7 @@ export function projectOf(run) {
 
 const GROUPERS = {
   role: (r) => [r.role || "unknown"],
+  backend: (r) => [r.backend || "companion"],
   project: (r) => [projectOf(r)],
   task_type: (r) => [r.task_type || "unknown"],
   duration: (r) => [durationBucket(workerDuration(r))],

@@ -10,6 +10,7 @@ You are Codex. Configure your local/project role behavior to support the orchest
 - `../shared/REVIEW_CONTRACT.md`
 - `../shared/CREATIVE_PIPELINE_RULES.md`
 - `../shared/MANUAL_SETUP.md`
+- `../runtime/prompts/` for the shared worker rules and report contracts (installed as `../prompts/`)
 - all files in this `codex/` folder
 
 ## Actions

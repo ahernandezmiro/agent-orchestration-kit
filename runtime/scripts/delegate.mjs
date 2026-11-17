@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Role-pinned delegation to Codex through the OpenAI codex-plugin-cc companion runtime.
+// Shared role, packet, and job commands for the worker gateways.
 // Extended version: preserves the original policy layer and adds observability/telemetry.
 //
 // Suggested location:
@@ -58,7 +58,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { resolveCodexBin, buildExecArgs, submitJob, readJob, waitJob, cancelJob, reconcileLost, normalizeExecResult } from "./exec-backend.mjs";
+import { resolveCodexBin, resolveWorkerBin, buildExecArgs, submitJob, readJob, waitJob, cancelJob, reconcileLost, normalizeExecResult } from "./exec-backend.mjs";
+import { CLAUDE_EFFORTS, CLAUDE_ENV_UNSET, CLAUDE_MIN_VERSION, buildClaudeArgs, supportsClaudeVersion } from "./claude-backend.mjs";
 import {
   QUOTA_BLOCKED_EXIT_CODE, loadQuotaRules, readQuotaSnapshot, ongoingReservations, evaluateQuotaGate, formatGateLine
 } from "./quota-gate.mjs";
@@ -108,6 +109,17 @@ const ROLES = {
 const VALID_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const VALID_OUTCOMES = ["accepted", "minor_rework", "major_rework", "failed", "not_applicable"];
 const VALID_USEFULNESS = ["yes", "no", "mixed"];
+const isDetached = (backend) => backend === "exec" || backend === "claude";
+
+function resolveClaudeBin() {
+  const env = { ...process.env };
+  for (const name of ["ANTHROPIC_API_KEY", ...CLAUDE_ENV_UNSET]) delete env[name];
+  const bin = resolveWorkerBin("claude", "CLAUDE_BIN", { env });
+  if (bin.ok && !supportsClaudeVersion(bin.version)) {
+    return { ok: false, reason: "unsupported_version", detail: `Claude Code ${CLAUDE_MIN_VERSION} or later is required (found ${bin.version || "unknown"})` };
+  }
+  return bin;
+}
 
 /**
  * Resolve the model and default effort for every role from config/models.json, with
@@ -264,7 +276,7 @@ function findRolePrompt(startDir, roleName) {
   // inspectRolesDir already warned about a non-file entry here; do not warn twice.
   const global = fs.existsSync(globalFile) && fs.statSync(globalFile).isFile() ? readPrompt(globalFile, "global") : null;
   if (global) return global;
-  const defaultFile = path.join(KIT_ROOT, "codex", "prompts", "roles", role.defaultPrompt);
+  const defaultFile = path.join(KIT_ROOT, "prompts", "roles", role.defaultPrompt);
   const fallback = readPrompt(defaultFile, "default");
   if (!fallback) fail(`default role prompt not found: ${defaultFile}`);
   return fallback;
@@ -490,9 +502,9 @@ function verifyGit(baseline, { quiet = false, worktree = null } = {}) {
 
 function buildPrompt(roleName, role, packetText, rolePrompt) {
   const parts = [
-    readKitFile("codex/prompts/base.md"),
+    readKitFile("prompts/base.md"),
     rolePrompt,
-    readKitFile(`codex/prompts/contracts/${role.contract}.md`),
+    readKitFile(`prompts/contracts/${role.contract}.md`),
     "## Task packet",
     "```yaml\n" + packetText.trim() + "\n```",
     "Finish with the YAML report above as the last thing in your reply."
@@ -671,7 +683,11 @@ async function cmdQuota(options) {
 async function cmdRun(options) {
   const roleName = options.role;
   let role = ROLES[roleName];
-  if (!role) fail(`--role must be one of: ${Object.keys(ROLES).join(", ")}`);
+  if (!Object.hasOwn(ROLES, roleName)) fail(`--role must be one of: ${Object.keys(ROLES).join(", ")}`);
+  const backend = options.backend || process.env.ORCH_BACKEND || "exec";
+  if (!isDetached(backend) && backend !== "companion") fail(`--backend must be exec or companion for Codex, or claude (got ${backend})`);
+  const useClaude = backend === "claude";
+  if (useClaude && role.write) fail("Claude delegation supports astra-review and astra-investigate");
   if (!options.packet) fail("--packet <file> is required");
   const packetPath = path.resolve(options.packet);
   if (!fs.existsSync(packetPath)) fail(`packet not found: ${packetPath}`);
@@ -681,14 +697,18 @@ async function cmdRun(options) {
   const rolePrompt = findRolePrompt(cwd, roleName);
   for (const warning of rolePrompt.warnings) console.log(warning);
   console.log(`ROLE PROMPT: ${rolePrompt.source} ${rolePrompt.path}`);
-  const modelSelection = loadModelSelection().selection[roleName];
-  const projectRole = project?.config.roles?.[roleName] || {};
+  const modelSelection = useClaude
+    ? { model: process.env.ORCH_CLAUDE_MODEL?.trim() || "sonnet", effort: "high" }
+    : loadModelSelection().selection[roleName];
+  const projectRole = useClaude ? {} : project?.config.roles?.[roleName] || {};
   const model = projectRole.model || modelSelection.model;
   const configuredEffort = projectRole.effort || modelSelection.effort;
   const effort = options.effort || configuredEffort;
-  const modelSource = projectRole.model ? "project" : "config";
-  const effortSource = options.effort ? "cli" : projectRole.effort ? "project" : "config";
-  if (!VALID_EFFORTS.includes(effort)) fail(`--effort must be one of: ${VALID_EFFORTS.join(", ")}`);
+  const modelSource = useClaude ? (process.env.ORCH_CLAUDE_MODEL?.trim() ? "env" : "default") : projectRole.model ? "project" : "config";
+  const effortSource = options.effort ? "cli" : projectRole.effort ? "project" : useClaude ? "default" : "config";
+  const allowedEfforts = useClaude ? CLAUDE_EFFORTS : VALID_EFFORTS;
+  if (!allowedEfforts.includes(effort)) fail(`--effort must be one of: ${allowedEfforts.join(", ")}`);
+  if (useClaude && !/^[a-z0-9][a-z0-9._\[\]-]*$/i.test(model)) fail("invalid ORCH_CLAUDE_MODEL");
   let blocks = splitTopLevel(fs.readFileSync(packetPath, "utf8"));
   const missing = role.required.filter((k) => !blocks.some((b) => b.key === k));
   if (missing.length) fail(`packet is missing required keys for ${roleName}: ${missing.join(", ")}`);
@@ -707,20 +727,22 @@ async function cmdRun(options) {
     role = { ...role, allowed: [...(role.allowed || []), "project_context"] };
   }
   const packetText = blocks.map((b) => b.text).join("\n");
-  const backend = options.backend || process.env.ORCH_BACKEND || "exec";
-  if (!["exec", "companion"].includes(backend)) fail(`--backend must be exec or companion (got ${backend})`);
-  const codexBin = backend === "exec" ? resolveCodexBin() : null;
-  if (codexBin && !codexBin.ok) fail(`codex CLI ${codexBin.reason}: ${codexBin.detail}`);
+  if (useClaude && !options["dry-run"] && !process.env.ANTHROPIC_API_KEY?.trim()) {
+    fail("set ANTHROPIC_API_KEY to your Claude Console API key before delegating to Claude");
+  }
+  const bin = useClaude ? (options["dry-run"] ? null : resolveClaudeBin()) : backend === "exec" ? resolveCodexBin() : null;
+  if (bin && !bin.ok) fail(`${useClaude ? "claude" : "codex"} CLI ${bin.reason}: ${bin.detail}`);
 
   ensureDirs();
   const taskIdRaw = packetScalar(blocks, "id") || "task";
   const taskId = sanitizeId(taskIdRaw);
   enforceBudget({ options, taskId, roleName });
   // Dry runs never reach Codex, so they neither need quota nor should depend on a live read.
-  const quotaGate = options["dry-run"] ? null : await enforceQuota(roleName, taskIdRaw);
+  const quotaGate = useClaude || options["dry-run"] ? null : await enforceQuota(roleName, taskIdRaw);
 
   const stamp = nowIso().replace(/[:.]/g, "-");
-  const base = path.join(RUNS_DIR, `${stamp}-${taskId}-${roleName}`);
+  const suffix = useClaude ? `-claude-${crypto.randomUUID().slice(0, 8)}` : "";
+  const base = path.join(RUNS_DIR, `${stamp}-${taskId}-${roleName}${suffix}`);
   const promptFile = `${base}.prompt.md`;
   const stdoutFile = `${base}.stdout.txt`;
   const stderrFile = `${base}.stderr.txt`;
@@ -797,7 +819,7 @@ async function cmdRun(options) {
     duration_ms: null,
     companion_path: null,
     backend,
-    exec: backend === "exec" ? { command: codexBin.command, source: codexBin.source, job_dir: `${base}.job`, thread_id: null,
+    exec: isDetached(backend) ? { command: bin?.command ?? null, source: bin?.source ?? null, job_dir: `${base}.job`, thread_id: null,
       failures: [], warnings: 0, reasons: [] } : null,
     companion_status: null,
     companion_signal: null,
@@ -837,10 +859,12 @@ async function cmdRun(options) {
     console.log(`PROJECT: ${project.file} (+${projectApplied.applied.constraints} constraints, +${projectApplied.applied.required_checks} checks, context ${projectApplied.applied.context ? "yes" : "no"}, overrides: ${overrides})`);
   }
 
+  const execArgs = useClaude ? buildClaudeArgs({ model, effort }) : backend === "exec"
+    ? buildExecArgs({ cwd, model, effort, sandbox: run.sandbox, lastMessageFile: path.join(run.exec.job_dir, "last-message.txt") })
+    : null;
   if (options["dry-run"]) {
-    if (backend === "exec") {
-      const execArgs = buildExecArgs({ cwd, model, effort, sandbox: run.sandbox, lastMessageFile: path.join(run.exec.job_dir, "last-message.txt") });
-      console.log(`DRY RUN: codex ${execArgs.join(" ")}`);
+    if (execArgs) {
+      console.log(`DRY RUN: ${useClaude ? "claude" : "codex"} ${execArgs.join(" ")}`);
     } else {
       console.log(`DRY RUN: node <codex-companion> ${args.join(" ")}`);
       console.log(`DRY RUN: companion=${findCompanion()}`);
@@ -852,12 +876,11 @@ async function cmdRun(options) {
     return 0;
   }
 
-  if (backend === "exec") {
-    const jobDir = `${base}.job`;
-    const lastMessageFile = path.join(jobDir, "last-message.txt");
-    const execArgs = buildExecArgs({ cwd, model, effort, sandbox: run.sandbox, lastMessageFile });
+  if (execArgs) {
+    const jobDir = run.exec.job_dir;
     const submitStarted = Date.now();
-    const submitted = await submitJob({ jobDir, command: codexBin.command, prefixArgs: codexBin.prefixArgs, args: execArgs, cwd, promptFile });
+    const submitted = await submitJob({ jobDir, command: bin.command, prefixArgs: bin.prefixArgs, args: execArgs, cwd, promptFile,
+      ...(useClaude ? { format: "claude", envUnset: CLAUDE_ENV_UNSET } : {}) });
     run.submission_ms = Date.now() - submitStarted;
     run.job_id = `exec:${run.run_id}`;
     if (submitted.state.status === "pending") console.log("EXEC: runner start not confirmed; collect will resolve it");
@@ -887,7 +910,7 @@ async function cmdRun(options) {
     run.status = result.status === 0 ? "submitted_background" : "submission_failed";
     if (run.status === "submission_failed") run.finished_at = nowIso();
     saveRun(run, "run_submitted_background");
-    console.log(`GIT GUARD: baseline saved. When the job finishes, finalize the run (result + git guard + telemetry):\n  node ~/.claude/orchestration/scripts/codex-delegate.mjs collect ${run.run_id} --wait`);
+    console.log(`GIT GUARD: baseline saved. When the job finishes, finalize the run (result + git guard + telemetry):\n  node "${process.argv[1]}" collect ${run.run_id} --wait`);
     console.log(`TELEMETRY: ${runFile}`);
     return result.status;
   }
@@ -954,7 +977,8 @@ async function finalizeExecRun(run, job) {
   run.exec.failures = events.failures || [];
   run.exec.warnings = events.warnings || 0;
   run.exec.reasons = normalized.reasons || [];
-  run.codex_usage = events.usage || {};
+  if (run.backend === "claude") run.claude_usage = events.usage || {};
+  else run.codex_usage = events.usage || {};
   run.finished_at = job.state.finished_at;
   run.collected_at = nowIso();
   const duration = job.state.started_at && job.state.finished_at
@@ -1039,7 +1063,7 @@ async function cmdCollect(options, positionals) {
   const locked = withFinalizeLock(run, async () => {
   const latest = loadRun(run.run_file);
   if (alreadyFinalized(latest)) return printAlreadyFinalized(latest);
-  if (latest.backend === "exec") {
+  if (isDetached(latest.backend)) {
     const jobDir = latest.exec.job_dir;
     let job = readJob(jobDir);
     if (job.state.status === "lost") {
@@ -1126,7 +1150,7 @@ async function cmdPassThrough(command, options, positionals) {
       try {
         if (fs.existsSync(file) && fs.statSync(file).isFile()) {
           const candidate = JSON.parse(fs.readFileSync(file, "utf8"));
-          if (candidate.backend === "exec") { execRun = { ...candidate, run_file: file }; break; }
+          if (isDetached(candidate.backend)) { execRun = { ...candidate, run_file: file }; break; }
         }
       } catch { /* unrelated or incomplete run record */ }
     }
@@ -1135,7 +1159,7 @@ async function cmdPassThrough(command, options, positionals) {
         const file = path.join(RUNS_DIR, name);
         try {
           const candidate = JSON.parse(fs.readFileSync(file, "utf8"));
-          if (candidate.backend === "exec") { execRun = { ...candidate, run_file: file }; break; }
+          if (isDetached(candidate.backend)) { execRun = { ...candidate, run_file: file }; break; }
         } catch { /* ignore malformed records */ }
       }
     }
@@ -1286,6 +1310,7 @@ function cmdShow(options, positionals) {
     required_checks_count: run.required_checks_count,
     failure_hint: run.failure_hint,
     codex_usage: run.codex_usage,
+    claude_usage: run.claude_usage,
     exec: run.exec,
     assessment: run.assessment,
     post_worker: run.post_worker,
@@ -1606,80 +1631,88 @@ function cmdMetrics(options) {
   return 0;
 }
 
-const [command, ...rest] = process.argv.slice(2);
-const { options, positionals } = parseArgs(rest);
+export async function main(backend) {
+  const [command, ...rest] = process.argv.slice(2);
+  const { options, positionals } = parseArgs(rest);
+  if (backend && ["run", "which"].includes(command)) options.backend = backend;
 
-switch (command) {
-  case "run":
-    process.exit(await cmdRun(options));
-  case "quota":
-    process.exit(await cmdQuota(options));
-  case "status":
-  case "result":
-  case "cancel":
-    process.exit(await cmdPassThrough(command, options, positionals));
-  case "verify-git": {
-    if (!positionals[0]) fail("verify-git <baseline.json>");
-    const baseline = JSON.parse(fs.readFileSync(positionals[0], "utf8"));
-    const guard = verifyGit(baseline);
-    process.exit(guard.ok ? 0 : 3);
-  }
-  case "which":
-    {
-      const bin = resolveCodexBin();
-      const companion = findCompanion({ quiet: true });
-      console.log(bin.ok ? `codex: ${bin.command} (${bin.source})` : `codex: not found (${bin.reason}: ${bin.detail})`);
-      console.log(companion ? `companion: ${companion}` : "companion: not found");
-      process.exit(bin.ok || companion ? 0 : 2);
+  switch (command) {
+    case "run":
+      process.exit(await cmdRun(options));
+    case "quota":
+      process.exit(await cmdQuota(options));
+    case "status":
+    case "result":
+    case "cancel":
+      process.exit(await cmdPassThrough(command, options, positionals));
+    case "verify-git": {
+      if (!positionals[0]) fail("verify-git <baseline.json>");
+      const baseline = JSON.parse(fs.readFileSync(positionals[0], "utf8"));
+      const guard = verifyGit(baseline);
+      process.exit(guard.ok ? 0 : 3);
     }
-  case "models": {
-    const { selection, sources } = loadModelSelection();
-    if (options.json) console.log(JSON.stringify({ sources, roles: selection }, null, 2));
-    else {
-      console.log(`config: ${sources.join(" + ")}`);
-      for (const [roleName, { model, effort }] of Object.entries(selection)) console.log(`${roleName}\t${model}\t${effort}`);
+    case "which":
+      {
+        if (options.backend === "claude") {
+          const bin = resolveClaudeBin();
+          console.log(bin.ok ? `claude: ${bin.command} (${bin.version})` : `claude: unavailable (${bin.reason}: ${bin.detail})`);
+          process.exit(bin.ok ? 0 : 2);
+        }
+        const bin = resolveCodexBin();
+        const companion = findCompanion({ quiet: true });
+        console.log(bin.ok ? `codex: ${bin.command} (${bin.source})` : `codex: not found (${bin.reason}: ${bin.detail})`);
+        console.log(companion ? `companion: ${companion}` : "companion: not found");
+        process.exit(bin.ok || companion ? 0 : 2);
+      }
+    case "models": {
+      const { selection, sources } = loadModelSelection();
+      if (options.json) console.log(JSON.stringify({ sources, roles: selection }, null, 2));
+      else {
+        console.log(`config: ${sources.join(" + ")}`);
+        for (const [roleName, { model, effort }] of Object.entries(selection)) console.log(`${roleName}\t${model}\t${effort}`);
+      }
+      process.exit(0);
     }
-    process.exit(0);
+    case "config":
+      if (!options.explain) fail("config --explain <role> [--cwd <dir>] [--json]");
+      process.exit(cmdConfigExplain(options, [options.explain, ...positionals]));
+    case "runs":
+      process.exit(cmdRuns(options));
+    case "show":
+      process.exit(cmdShow(options, positionals));
+    case "assess":
+      process.exit(cmdAssess(options, positionals));
+    case "record-skip":
+      process.exit(cmdRecordSkip(options));
+    case "metrics":
+      process.exit(cmdMetrics(options));
+    case "collect":
+      process.exit(await cmdCollect(options, positionals));
+    case "abandon":
+      process.exit(cmdAbandon(options, positionals));
+    case "worktree-apply":
+    case "worktree-clean":
+      process.exit(cmdWorktree(command, options, positionals));
+    default:
+      fail([
+        "usage:",
+        "  run --role <role> --packet <file> [--cwd <dir>] [--background] [--effort <e>] [--reason <text>] [--task-type <type>] [--parent <id>] [--attempt <n>] [--budget-key <key>] [--max-attempts <n>] [--dry-run] [--worktree] [--base <ref>]",
+        "  status|result|cancel [job-id] [--cwd <dir>] [--wait] [--timeout-ms <ms>]",
+        "  verify-git <baseline.json>",
+        "  which",
+        "  models [--json]",
+        "  config --explain <role> [--cwd <dir>] [--json]",
+        "  quota [--role <role>] [--json]",
+        "  runs [--json] [--limit <n>] [--role <role>] [--status <status>]",
+        "  show <run-id-or-json-path> [--json]",
+        "  assess <run-id-or-json-path> --outcome <accepted|minor_rework|major_rework|failed|not_applicable> [--useful <yes|no|mixed>] [--findings <n>] [--accepted-findings <n>] [--rework-rounds <n>] [--notes <text>]",
+        `      [--cause <${VALID_CAUSES.join("|")},...>] [--verified <tests,runtime,visual|none>] [--verified-findings <n>] [--critical-findings <n>]`,
+        "  record-skip --task-id <id> --reason <text> [--task-type <type>] [--role <expected-role>] [--parent <id>] [--cwd <dir>]",
+        `  metrics [--json] [--role <role>] [--since <ISO-date-or-days>] [--by <${GROUP_KEYS.join("|")}>] [--runs-dir <dir> [--all]]`,
+        "  collect <run-id-or-json-path> [--wait] [--timeout-ms <ms>]",
+        "  abandon <run-id-or-json-path> [--reason <text>]",
+        "  worktree-apply <run-id>",
+        "  worktree-clean <run-id> [--force]",
+      ].join("\n"));
   }
-  case "config":
-    if (!options.explain) fail("config --explain <role> [--cwd <dir>] [--json]");
-    process.exit(cmdConfigExplain(options, [options.explain, ...positionals]));
-  case "runs":
-    process.exit(cmdRuns(options));
-  case "show":
-    process.exit(cmdShow(options, positionals));
-  case "assess":
-    process.exit(cmdAssess(options, positionals));
-  case "record-skip":
-    process.exit(cmdRecordSkip(options));
-  case "metrics":
-    process.exit(cmdMetrics(options));
-  case "collect":
-    process.exit(await cmdCollect(options, positionals));
-  case "abandon":
-    process.exit(cmdAbandon(options, positionals));
-  case "worktree-apply":
-  case "worktree-clean":
-    process.exit(cmdWorktree(command, options, positionals));
-  default:
-    fail([
-      "usage:",
-      "  run --role <role> --packet <file> [--cwd <dir>] [--background] [--effort <e>] [--reason <text>] [--task-type <type>] [--parent <id>] [--attempt <n>] [--budget-key <key>] [--max-attempts <n>] [--dry-run] [--worktree] [--base <ref>]",
-      "  status|result|cancel [job-id] [--cwd <dir>] [--wait] [--timeout-ms <ms>]",
-      "  verify-git <baseline.json>",
-      "  which",
-      "  models [--json]",
-      "  config --explain <role> [--cwd <dir>] [--json]",
-      "  quota [--role <role>] [--json]",
-      "  runs [--json] [--limit <n>] [--role <role>] [--status <status>]",
-      "  show <run-id-or-json-path> [--json]",
-      "  assess <run-id-or-json-path> --outcome <accepted|minor_rework|major_rework|failed|not_applicable> [--useful <yes|no|mixed>] [--findings <n>] [--accepted-findings <n>] [--rework-rounds <n>] [--notes <text>]",
-      `      [--cause <${VALID_CAUSES.join("|")},...>] [--verified <tests,runtime,visual|none>] [--verified-findings <n>] [--critical-findings <n>]`,
-      "  record-skip --task-id <id> --reason <text> [--task-type <type>] [--role <expected-role>] [--parent <id>] [--cwd <dir>]",
-      `  metrics [--json] [--role <role>] [--since <ISO-date-or-days>] [--by <${GROUP_KEYS.join("|")}>] [--runs-dir <dir> [--all]]`,
-      "  collect <run-id-or-json-path> [--wait] [--timeout-ms <ms>]",
-      "  abandon <run-id-or-json-path> [--reason <text>]",
-      "  worktree-apply <run-id>",
-      "  worktree-clean <run-id> [--force]",
-    ].join("\n"));
 }

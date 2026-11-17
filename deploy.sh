@@ -5,7 +5,7 @@
 # Steps: find Node >= 18 (non-interactive WSL shells often skip ~/.bashrc and still see the
 # distro's old /usr/bin/node, so user-level installs are probed: $NODE_BIN_DIR, pnpm, Volta,
 # nvm) -> prompt-freeze check (prompts must stay
-# byte-identical during the evaluation period) -> claude/global/install.mjs, which replaces every
+# byte-identical during the evaluation period) -> claude/install.mjs, which replaces every
 # kit-managed file under ~/.claude/orchestration, the two subagents, the lead's rules file (~/.claude/rules/orchestration-kit.md)
 # and the permission rules (backing up settings.json first; CLAUDE.md is only touched to remove an old kit block). runs/ and telemetry/
 # are never touched. Fresh installs and updates use the same path.
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALLER="$REPO_ROOT/claude/global/install.mjs"
+INSTALLER="$REPO_ROOT/claude/install.mjs"
 PROMPT_FREEZE="$REPO_ROOT/claude/global/test/prompt-freeze.mjs"
 MINIMUM_NODE_MAJOR=18
 

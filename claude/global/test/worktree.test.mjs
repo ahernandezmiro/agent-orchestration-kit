@@ -29,7 +29,7 @@ console.log('done');
   git(repo, "init", "-q"); git(repo, "config", "user.email", "test@example.test"); git(repo, "config", "user.name", "test"); git(repo, "config", "core.autocrlf", "false");
   fs.writeFileSync(path.join(repo, "a.txt"), "base\n"); fs.writeFileSync(path.join(repo, "untouched.txt"), "untouched base\n"); git(repo, "add", "."); git(repo, "commit", "-qm", "base");
   const kit = path.join(temp, "kit"); fs.mkdirSync(kit);
-  for (const [src, dst] of [["shared", "shared"], ["codex", "codex"], ["claude/global/scripts", "scripts"], ["claude/global/config", "config"]]) fs.cpSync(path.join(REPO, src), path.join(kit, dst), { recursive: true });
+  for (const [src, dst] of [["shared", "shared"], ["runtime/prompts", "prompts"], ["runtime/scripts", "scripts"], ["runtime/config", "config"]]) fs.cpSync(path.join(REPO, src), path.join(kit, dst), { recursive: true });
   fs.rmSync(path.join(kit, "config", "models.local.json"), { force: true });
   const companion = path.join(temp, "companion.mjs"); fs.writeFileSync(companion, stub);
   const sentinel = path.join(temp, "sentinel-codex.mjs"); fs.writeFileSync(sentinel, `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(path.join(temp, "sentinel-marker.txt"))}, "called\\n"); process.exit(97);\n`);

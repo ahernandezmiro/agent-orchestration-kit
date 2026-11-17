@@ -4,15 +4,14 @@ These actions may require human approval or should be verified manually.
 
 ## 1. Authentication
 
-Confirm both CLIs are already authenticated under the intended subscriptions:
-- Claude Code / Claude CLI -> Anthropic subscription/account
-- Codex CLI -> ChatGPT/Codex subscription/account
+Use the authentication for the worker you plan to run.
 
-Do not insert API keys into this kit unless you explicitly decide to switch to API billing.
+- For Codex workers, sign in to the Codex CLI.
+- For Claude workers, supply your Claude Console API key in `ANTHROPIC_API_KEY` through the gateway's shell environment. Keep credentials out of kit files. [Claude worker setup](../codex/LEAD_INSTALL.md#delegate-a-review-to-claude-code)
 
-## 2. Verify plugin command names locally
+## 2. Verify optional plugin commands
 
-Because plugins can update, ask Claude Code to inspect its installed plugin metadata and confirm the exact currently available commands/agents for:
+For a workflow using the legacy companion backend or a native plugin command, inspect the installed plugin metadata for the relevant integration.
 - OpenAI `codex-plugin-cc`
 - Anthropic Codex Dispatch
 - Anthropic `codex-review`

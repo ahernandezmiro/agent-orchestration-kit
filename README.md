@@ -1,89 +1,66 @@
 # orchestration-kit
 
-<!-- Repo overview for the lead + Codex workers (Luna/Sol/Astra) orchestration kit.
-     Author: maintained with Claude Code for the frontier-model orchestration setup. -->
+Start in Claude Code or Codex. The model selected in that session is the **lead**, which plans work, routes bounded tasks, verifies results, and owns the final answer. Each lead can call either worker gateway from the same installation. Routing policy, YAML contracts, job collection, and telemetry are shared. [Routing policy](shared/ROUTING_POLICY.md)
 
-This repo is the source of truth for the multi-model orchestration setup: the model you select in Claude Code (the lead) orchestrates, and Codex workers (Luna, Sol, Astra) are reached through `codex-delegate.mjs`. You edit, commit and push it here, then pull and run the deploy script on each machine (Windows hosts, WSL distros, other devices). Tested with Claude Opus 5.5 and Claude Fable 5.2 as lead.
+| Client | Lead entry point | Worker gateway | Worker capabilities |
+|---|---|---|---|
+| Claude Code | Start a new session after installing the kit rules | `scripts/claude-delegate.mjs` | Read-only independent review and investigation. Requires Claude Code 2.1.286+ and a Claude Console API key |
+| Codex | Invoke `$orchestration-kit` in a new session | `scripts/codex-delegate.mjs` | Implementation, tests, independent review, and investigation. Uses the Codex CLI login and quota gate |
 
-The kit itself is documented in [claude/GLOBAL_INSTALL.md](claude/GLOBAL_INSTALL.md) (architecture, validation, gotchas) and [shared/README.md](shared/README.md) (policy).
+## Install
 
-## Layout
+Run the installer for the client whose runtime directory you want to use. Both require Node.js 18 or later.
 
-| Path | What it is | Installed to |
-|---|---|---|
-| `shared/`, `codex/`, `claude/*.md` | policy, contracts and role docs (prompt text) | `~/.claude/orchestration/{shared,codex,claude}/` |
-| `claude/global/scripts/codex-delegate.mjs` | delegation wrapper: roles, prompt assembly, git guard, telemetry | `~/.claude/orchestration/scripts/` |
-| `claude/global/config/models.json` | **model + default effort per role** | `~/.claude/orchestration/config/` |
-| `claude/global/config/quota.json` | **quota-gate threshold per role** | same |
-| `claude/global/scripts/quota-gate.mjs` | Codex quota read + gate, used by the wrapper | `~/.claude/orchestration/scripts/` |
-| `claude/global/scripts/pack-telemetry.mjs` | zips runs + telemetry for offline analysis | `~/.claude/orchestration/scripts/` |
-| `claude/global/scripts/telemetry-lib.mjs` | schema-2 attribution: working-tree snapshots, worker/post-worker diff stats, report parsing, `metrics --by` | same |
-| `claude/global/scripts/lead-usage.mjs` | offline: the lead's tokens spent between each worker result and its assessment, and which models led, from local session transcripts | same |
-| `claude/global/scripts/exec-backend.mjs`, `exec-runner.mjs` | default backend: shell-free `codex exec` resolution and argv, detached job runner with atomic state, event normalization, verified cancel | same |
-| `claude/global/templates/project.json` | example per-project defaults (`<repo>/.orchestration/project.json`) | `~/.claude/orchestration/templates/` |
-| `claude/global/config/models.local.json` | optional per-machine override (gitignored) | same, if present |
-| `claude/global/agents/*.md` | `luna-worker`, `astra-reviewer` subagents | `~/.claude/agents/` |
-| `codex/prompts/` | worker prompt fragments: `base.md`, `roles/*.md` (overridable defaults), `contracts/*.md` | `~/.claude/orchestration/codex/prompts/` |
-| `claude/global/CLAUDE.orchestration.md` | the lead's instructions | generated, together with `shared/ROUTING_POLICY.md` and `claude/CLAUDE.md`, into `~/.claude/rules/orchestration-kit.md` |
-| `claude/global/scripts/rules-file.mjs` | builds that rules file (one flat file, no `@` imports) | `~/.claude/orchestration/scripts/` |
-| `claude/global/scripts/managed-block.mjs` | id-scoped `<!-- BEGIN/END orchestration-kit:<id> -->` blocks; now used only to remove the block older kit versions put in `~/.claude/CLAUDE.md` | `~/.claude/orchestration/scripts/` |
-| `claude/global/settings.permissions.json` | allow/ask rules | merged into `~/.claude/settings.json` |
-| `claude/global/install.mjs` | cross-platform installer | — |
-| `claude/global/test/` | validation packets, playground creator, prompt-freeze guard + golden prompts, quota-gate and packer tests | — |
-| `deploy.ps1` / `deploy.sh` | deploy entry points for Windows / Linux-WSL | — |
+| Client | Install or update | Runtime directory | Native lead registration |
+|---|---|---|---|
+| Claude Code | `node claude/install.mjs` | `~/.claude/orchestration/` | Rules and agents under `~/.claude/` |
+| Codex | `node codex/install.mjs` | `$CODEX_HOME/orchestration/` (default `~/.codex/orchestration/`) | `~/.agents/skills/orchestration-kit/` |
 
-## Deploy (fresh install or update)
+Add `--runtime-only` to either command to install both gateways without registering lead instructions. Add `--dry-run` to preview the install. Each runtime keeps its own runs, overrides, and Codex quota reservations. For client-specific requirements, upgrades, and uninstall commands, see the [Claude Code guide](claude/GLOBAL_INSTALL.md) and [Codex guide](codex/LEAD_INSTALL.md).
 
-Prerequisites on each machine: Node.js 18+ and the Codex CLI logged in (`codex login`). On Windows the wrapper needs the real `codex.exe` on PATH (the standalone installer provides it); with only npm's `codex.cmd` shim, set `CODEX_BIN` to the executable or the package's JS entry. OpenAI's `codex` Claude plugin is optional: it's only used with `--backend companion`.
+## Shared layout
 
-Windows (PowerShell):
-```powershell
-git clone <remote> $env:USERPROFILE\dev\orchestration-kit
-Set-Location $env:USERPROFILE\dev\orchestration-kit
-.\deploy.ps1 -Check
-.\deploy.ps1
+Both installations use this layout under their runtime directory.
+
+| Installed path | Purpose |
+|---|---|
+| `scripts/` | Worker gateways, shared job lifecycle, and telemetry tools |
+| `config/` | Worker model defaults and Codex quota thresholds |
+| `prompts/`, `templates/` | Shared prompt fragments, report schemas, and YAML packet templates |
+| `shared/` | Routing policy and task and review contracts |
+| `claude/`, `codex/` | Client-specific reference material |
+| `runs/`, `telemetry/`, `overrides/` | Local job records, events, and custom prompts, preserved on update |
+| `deployed.json` | Client, kit revision, and effective Codex model configuration |
+
+In the checkout, `runtime/` contains the gateways and common deployment code. `shared/` contains provider-independent policy. Client integrations live under `claude/` and `codex/`. To add a lead client, reuse `runtime/install-runtime.mjs` and supply that client's native entry point. To add a worker provider, add a gateway and backend under `runtime/scripts/` and connect them to the shared packet and job commands in `delegate.mjs`. The client's lead entry point and the worker backend can be added independently.
+
+## Run and collect a delegation
+
+Use `codex` or `claude` for `<provider>` and the path to either installation for `<runtime>`. Start with the matching packet template under `<runtime>/templates/`.
+
+```text
+node "<runtime>/scripts/<provider>-delegate.mjs" run --role astra-review --packet "<review.yaml>" --cwd "<project>" --background
+node "<runtime>/scripts/<provider>-delegate.mjs" collect <run-id> --wait
 ```
 
-Linux / WSL:
-```bash
-git clone <remote> ~/dev/orchestration-kit && cd ~/dev/orchestration-kit
-./deploy.sh --check
-./deploy.sh
-```
-
-To update later, run `git pull` and then the deploy script again. Start a new Claude Code session afterwards, because agents and rules files only load at session start.
-
-What a deploy does:
-1. Finds Node 18 or newer. `deploy.sh` also checks `$NODE_BIN_DIR`, pnpm, Volta and nvm, because non-interactive WSL shells often only see an old `/usr/bin/node`.
-2. Runs the prompt-freeze guard and aborts if any prompt changed (see below).
-3. Runs `install.mjs`:
-   - preflight checks;
-   - deletes and re-copies the kit-managed folders (`shared, codex, claude, scripts, templates, config`), so removed files disappear too;
-   - installs the agents;
-   - writes the lead's instructions to `~/.claude/rules/orchestration-kit.md`, a file the kit owns (a hand-edited copy is backed up to `~/.claude/orchestration/backups/` first);
-   - removes the block that older kit versions put in `~/.claude/CLAUDE.md`, once, with a backup. After that it never writes `CLAUDE.md`. If the block's markers are malformed it leaves the file alone, finishes the install and exits non-zero so you can remove the block by hand;
-   - merges the permission rules (`settings.json` is written, and backed up first, only when it changes). No `AGENTS.md` is ever written;
-   - writes `~/.claude/orchestration/deployed.json` (commit, dirty flag, host, effective models).
-4. Prints the effective model selection.
-
-`runs/`, `telemetry/` and `overrides/` are never touched. Other options: `-DryRun`/`--dry-run`, `-Uninstall [-Purge]`/`--uninstall [--purge]`, `-AllowPromptChange`/`--allow-prompt-change`.
+Both gateways also accept `status`, `result`, `cancel`, `show`, and `assess` with the run ID. The lead verifies the report before recording its assessment.
 
 ## Model configuration
 
-`claude/global/config/models.json` maps each role to a Codex model id and a default reasoning effort:
+`runtime/config/models.json` maps each Codex worker role to a model ID and a default reasoning effort.
 
 ```json
 { "roles": { "luna-implement": { "model": "gpt-6-luna", "effort": "high" }, "...": {} } }
 ```
 
 - **Change models for every machine:** edit `models.json`, commit, push, pull on each machine, deploy.
-- **Change one machine only:** create `claude/global/config/models.local.json` in that machine's checkout. It's gitignored and has the same shape, but any subset of roles and fields is allowed. Then deploy.
-- **Check a machine:** `node ~/.claude/orchestration/scripts/codex-delegate.mjs models`.
+- **One-machine override**. Create `runtime/config/models.local.json` in the checkout and rerun the installer. The installer also reads the older checkout path, `claude/global/config/models.local.json`, if the new one is absent. Both paths are gitignored.
+- **Effective settings**. Run `node "<runtime>/scripts/codex-delegate.mjs" models` using your installed runtime path.
 - **Valid efforts:** `none, minimal, low, medium, high, xhigh`. `--effort` on a single run still overrides the default.
 - **Bad config fails loudly.** An unknown role, a missing model, an invalid effort or invalid JSON stops `run` with a message naming the file. The wrapper never falls back to a built-in model.
 - **Check the model works first.** The Codex cache can list models your account or CLI still rejects. Before switching, run `codex exec --skip-git-repo-check --sandbox read-only --model <id> "Reply OK"`.
 
-Roles themselves (prompt, sandbox, contract, required packet keys, blind-review allowlist) stay in `codex-delegate.mjs` and are not configurable. In particular, the worker display name in the prompt ("You are GPT-6 Luna…") is part of the frozen prompt and does not follow the model id.
+The shared gateway defines the role's required packet keys, permissions, and report format. The configured model can vary by worker provider. See the [Claude worker setup](codex/LEAD_INSTALL.md#delegate-a-review-to-claude-code) for model and effort selection.
 
 ## Project defaults
 
@@ -91,24 +68,24 @@ A project can add rules to every packet it receives without touching the kit. Cr
 
 - `constraints`, `required_checks`: appended to every Luna/Sol packet. Packets must use block lists (`key:` followed by `- item` lines); flow lists like `[]` are rejected so nothing gets silently dropped.
 - `context`: added to task packets as a `project_context:` block. Astra packets get it only with `"review_safe": true`, and never get the constraints or checks.
-- `roles.<role>.model` / `.effort`: override `config/models.json` for that project. `--effort` on the command line still wins.
+- `roles.<role>.model` / `.effort` override the Codex worker defaults for that project. `--effort` on the command line still wins.
 - Strictly append-only: sandbox, git rules, the blind-review allowlist and the frozen prompt text can't be changed. Invalid files stop the run (exit 2) and name the file.
 - Each run records `project_config` (file, sha256, what was applied), `model_source`/`effort_source`, and `prompt_sha256`, so runs with and without project defaults stay comparable.
-- Check what applies: `node ~/.claude/orchestration/scripts/codex-delegate.mjs config --explain <role> --cwd <repo> [--json]`.
+- To see effective Codex settings and project defaults, run `node "<runtime>/scripts/codex-delegate.mjs" config --explain <role> --cwd <repo> [--json]`.
 
 ## Role prompt overrides
 
-A worker prompt has five parts: base rules (`codex/prompts/base.md`), the role prompt, the report contract (`codex/prompts/contracts/`), the packet, and a closing line. Only the role prompt can be replaced. The wrapper uses the first of these files that exists:
+Both gateways compose the prompt from shared base rules, a role prompt, a report contract, the packet, and a closing line. The worker uses the first available role prompt from this list.
 
 1. `<repo>/.orchestration/roles/<role>.md`: the nearest one from `--cwd` up to the git root, looked up separately for each role. It doesn't need a `project.json`. For `astra-review` / `astra-investigate`, it is used only if the same `.orchestration/` folder has a `project.json` with `"review_safe": true`.
-2. `~/.claude/orchestration/overrides/roles/<role>.md`: global for this machine. Deploys never touch it, and `--uninstall` keeps it unless you pass `--purge`.
-3. The kit default in `codex/prompts/roles/`.
+2. `<runtime>/overrides/roles/<role>.md` for this runtime. Updates preserve it.
+3. The kit default in `<runtime>/prompts/roles/`.
 
 An override replaces the whole role prompt, with no merging. It must be non-empty and at most 64 KiB, otherwise the run stops with exit 2. Overrides are trusted text: base rules and the report format take precedence over them, but only the sandbox and the git guard actually enforce anything. Each run prints `ROLE PROMPT: <default|global|project> <path>` and records `role_prompt` (source, path, sha256), so runs with overrides can be analysed separately. `config --explain` shows which file applies and any overrides it ignored.
 
-## Quota gate
+## Codex quota gate
 
-Every real `run` (not `--dry-run`) checks Codex quota before it delegates, so a worker doesn't start and then stop with partial or empty results. The check is a script, so the orchestrator doesn't decide anything: the call either goes ahead or exits with code **5** before any Codex work starts.
+Every live Codex delegation checks quota before starting. The gateway exits with code **5** when quota is insufficient or unknown. Claude workers use Claude Console billing and do not reserve Codex quota.
 
 How it works:
 1. It reads the 5h window (`window_minutes: 300`) from a short-lived `codex app-server` (`account/rateLimits/read`, the numbers `/status` shows; about 2–3 s). If that fails, it uses the newest `rate_limits` snapshot in `~/.codex/sessions` rollouts, as long as that window hasn't reset. If neither gives a value, the run is blocked.
@@ -131,14 +108,14 @@ Example: 60% remaining with one Astra and one Luna in flight leaves 60 − 25 �
 
 ## Exporting telemetry for analysis
 
-`pack-telemetry.mjs` writes one zip with everything the evaluation produced on a machine:
+`pack-telemetry.mjs` exports data from the runtime containing the script. Both gateways support `metrics --by backend` and record worker usage under the corresponding provider field.
 
 ```bash
-node ~/.claude/orchestration/scripts/pack-telemetry.mjs
+node "<runtime>/scripts/pack-telemetry.mjs"
 ```
 
-- **Where it reads:** `<home>/.claude/orchestration`, the root `install.mjs` deploys to: `%USERPROFILE%\.claude\orchestration` on Windows, `~/.claude/orchestration` on Linux/WSL. `--source <dir>` (repeatable) packs other dirs instead.
-- **Both sides of a Windows + WSL machine:** `--all-hosts` adds every WSL distro's `/home/*/.claude/orchestration` when run on Windows (via `\\wsl.localhost`; this boots a stopped distro), or every `/mnt/<drive>/Users/*/.claude/orchestration` when run in WSL.
+- Repeat `--source <dir>` to choose multiple runtimes for one archive.
+- On Windows or WSL, `--all-hosts` adds default Claude Code and Codex runtimes on the other side. On Windows this may start stopped WSL distros. Use `--source` for custom paths.
 - **What goes in:** `manifest.json` (sources, file/run/event counts, options), then one folder per source (`<host>-<platform>-<user>/`) with `runs/`, `telemetry/`, `deployed.json` and `config/*.json`. Kit files (scripts, prompts, templates) are not included.
 - **Trimming:** `--exclude-raw` drops `*.prompt.md`, `*.stdout.txt` and `*.stderr.txt`, which can hold project code; run records and events keep every metric. `--exclude-validation` drops `runs/_validation/` and `telemetry/_validation/`.
 - **Output:** `./orchestration-telemetry-<host>-<timestamp>.zip`, or `--out <file.zip>`. `--dry-run` prints the summary without writing. Zips are gitignored.
@@ -148,7 +125,7 @@ node ~/.claude/orchestration/scripts/pack-telemetry.mjs
 
 Telemetry compares delegations over time, so the prompts must not change while model and effort selection does. `node claude/global/test/prompt-freeze.mjs` checks two things:
 - **Worker prompts:** it runs the wrapper in `--dry-run` for all five roles in a temporary copy of the installed layout, with a stub companion and no real telemetry. Each prompt must be byte-identical to `claude/global/test/golden/<role>.golden.md`.
-- **Orchestrator and subagent prompts:** every prompt file Claude or a subagent loads must match `golden/static-prompts.sha256.json`.
+- **Lead and worker instructions**. The generated Claude rules and source prompt hashes, including the Codex lead skill, must match `golden/static-prompts.sha256.json`.
 
 The golden files were generated from the unmodified original kit, and the `luna-implement` golden matches a prompt recorded in production. The deploy scripts run the guard first and refuse to install on drift. `.gitattributes` forces LF endings because Git for Windows' `core.autocrlf` would otherwise rewrite the inlined prompt text.
 

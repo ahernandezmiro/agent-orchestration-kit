@@ -60,4 +60,4 @@ Reviewer should NOT receive the producing model's hidden reasoning or persuasive
 
 ## Output format
 
-The reviewer's output schema is defined once, in `codex/prompts/contracts/review.md`, and the wrapper adds it to every Astra review prompt. The 2D/3D/video checklists above aren't sent to the reviewer: copy the relevant points into the packet's `focus`.
+The reviewer's output schema is defined once, in `runtime/prompts/contracts/review.md`, and the wrapper adds it to every Astra review prompt. The 2D/3D/video checklists above aren't sent to the reviewer: copy the relevant points into the packet's `focus`.

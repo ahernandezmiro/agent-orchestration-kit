@@ -9,7 +9,7 @@ import path from "node:path";
 import {
   buildExecArgs, cancelJob, normalizeExecResult, readJob, reconcileLost, resolveCodexBin,
   submitJob, summarizeEvents, waitJob
-} from "../scripts/exec-backend.mjs";
+} from "../../../runtime/scripts/exec-backend.mjs";
 
 const STUB = `
 import fs from "node:fs";

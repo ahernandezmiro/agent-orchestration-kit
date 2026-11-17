@@ -4,6 +4,7 @@
 
 # --- Per-machine model/effort override (see README "Model configuration") ---
 claude/global/config/models.local.json
+runtime/config/models.local.json
 
 # --- Delegation runs and telemetry (written next to the wrapper's kit root) ---
 runs/

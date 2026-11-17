@@ -15,13 +15,13 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   evaluateQuotaGate, ongoingReservations, loadQuotaRules, readRolloutSnapshot
-} from "../scripts/quota-gate.mjs";
+} from "../../../runtime/scripts/quota-gate.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GLOBAL = path.resolve(HERE, "..");
 const REPO = path.resolve(GLOBAL, "..", "..");
 const ROLE_NAMES = ["luna-implement", "luna-test", "sol-implement", "astra-review", "astra-investigate"];
-const RULES = loadQuotaRules(path.join(GLOBAL, "config", "quota.json"), ROLE_NAMES);
+const RULES = loadQuotaRules(path.join(REPO, "runtime", "config", "quota.json"), ROLE_NAMES);
 const NOW = Date.parse("2026-10-18T12:00:00Z");
 
 const snapshot = (usedPercent) => ({ usedPercent, windowMinutes: 300, resetsAt: NOW / 1000 + 3600, source: "test" });
@@ -111,7 +111,7 @@ test("rollout fallback uses the newest snapshot only while its window is open", 
  */
 function stage() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "quota-stage-"));
-  for (const [src, dst] of [["shared", "shared"], ["codex", "codex"], ["claude/global/scripts", "scripts"], ["claude/global/config", "config"]]) {
+  for (const [src, dst] of [["shared", "shared"], ["runtime/prompts", "prompts"], ["runtime/scripts", "scripts"], ["runtime/config", "config"]]) {
     fs.cpSync(path.join(REPO, src), path.join(dir, dst), { recursive: true });
   }
   fs.rmSync(path.join(dir, "config", "models.local.json"), { force: true });

@@ -32,7 +32,7 @@ function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "project-defaults-test-"));
   t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(path.join(dir, "repo-wt"), { recursive: true, force: true }); });
   const kit = path.join(dir, "kit"); fs.mkdirSync(kit);
-  for (const [source, target] of [["shared", "shared"], ["codex", "codex"], ["claude/global/scripts", "scripts"], ["claude/global/config", "config"]])
+  for (const [source, target] of [["shared", "shared"], ["runtime/prompts", "prompts"], ["runtime/scripts", "scripts"], ["runtime/config", "config"]])
     fs.cpSync(path.join(REPO, source), path.join(kit, target), { recursive: true });
   fs.rmSync(path.join(kit, "config", "models.local.json"), { force: true });
   const repo = path.join(dir, "repo"); fs.mkdirSync(repo);

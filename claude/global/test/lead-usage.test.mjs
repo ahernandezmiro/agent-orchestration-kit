@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attribute } from "../scripts/lead-usage.mjs";
+import { attribute } from "../../../runtime/scripts/lead-usage.mjs";
 
 const WINDOWS = [{ run_id: "r1", role: "luna-implement", outcome: "accepted", root: "/repo", from: 1000, to: 5000 }];
 const usage = (ts, model, cwd = "/repo") => ({ ts, cwd, model, input: 1, cache_creation: 0, cache_read: 0, output: 1 });
@@ -30,7 +30,7 @@ test("subagent (sidechain) messages count toward usage but not toward lead model
 });
 
 test("loadUsage marks records from subagent transcripts", async (t) => {
-  const { loadUsage } = await import("../scripts/lead-usage.mjs");
+  const { loadUsage } = await import("../../../runtime/scripts/lead-usage.mjs");
   const fs = await import("node:fs");
   const os = await import("node:os");
   const path = await import("node:path");

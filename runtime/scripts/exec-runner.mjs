@@ -55,8 +55,10 @@ async function run() {
   let child;
   let spawnError = null;
   try {
+    const env = { ...process.env };
+    for (const name of spec.env_unset ?? []) delete env[name];
     child = spawn(spec.command, [...(spec.prefixArgs || []), ...spec.args], {
-      cwd: spec.cwd, env: { ...process.env }, stdio: [promptFd, eventsFd, stderrFd], shell: false,
+      cwd: spec.cwd, env, stdio: [promptFd, eventsFd, stderrFd], shell: false,
       windowsHide: true, detached: false
     });
     const latest = readState();

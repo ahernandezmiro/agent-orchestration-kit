@@ -6,13 +6,12 @@
 //                           [--exclude-raw] [--exclude-validation] [--dry-run]
 //
 // Sources (each is an orchestration dir that holds runs/ and/or telemetry/):
-//   default        <home>/.claude/orchestration — the same root install.mjs deploys to, i.e.
-//                  %USERPROFILE%\.claude\orchestration on Windows and ~/.claude/orchestration on
-//                  Linux/WSL/macOS. Run from the repo or the installed copy; both resolve the same.
+//   default        the runtime containing this script. From a checkout, falls back to
+//                  ~/.claude/orchestration for compatibility.
 //   --source <dir> pack this dir instead of the default; repeatable.
 //   --all-hosts    also pick up the other side of a Windows/WSL machine: on Windows every WSL
-//                  distro's /home/*/.claude/orchestration (via \\wsl.localhost), on WSL every
-//                  /mnt/<drive>/Users/*/.claude/orchestration. Reading a stopped distro boots it.
+//                  distro's default Claude Code and Codex runtimes (via \\wsl.localhost), on WSL
+//                  the default runtimes under /mnt/<drive>/Users. Reading a stopped distro boots it.
 //
 // Archive layout: manifest.json at the root, then one folder per source labelled
 // <host>-<platform>[-<user>] containing runs/, telemetry/ and, when present, deployed.json and
@@ -94,9 +93,11 @@ function hasTelemetry(dir) {
 }
 
 /**
- * Input: none. Output: the orchestration dir for the current user, matching install.mjs (homedir/.claude).
+ * Use the installed runtime, or the original default for calls from the source checkout.
  */
 export function defaultOrchestrationDir() {
+  const runtime = fileURLToPath(new URL("../", import.meta.url));
+  if (!fs.existsSync(path.join(runtime, "install-runtime.mjs"))) return runtime;
   return path.join(os.homedir(), ".claude", "orchestration");
 }
 
@@ -115,8 +116,10 @@ function discoverWslSources() {
     let users = [];
     try { users = fs.readdirSync(homeRoot); } catch { continue; }
     for (const user of users) {
-      const dir = path.win32.join(homeRoot, user, ".claude", "orchestration");
-      if (hasTelemetry(dir)) found.push({ dir, label: `wsl-${distro}-${user}` });
+      for (const client of ["claude", "codex"]) {
+        const dir = path.win32.join(homeRoot, user, `.${client}`, "orchestration");
+        if (hasTelemetry(dir)) found.push({ dir, label: `wsl-${distro}-${user}-${client}` });
+      }
     }
   }
   return found;
@@ -134,8 +137,10 @@ function discoverWindowsSourcesFromWsl() {
     let profiles = [];
     try { profiles = fs.readdirSync(usersRoot); } catch { continue; }
     for (const profile of profiles.filter((p) => !WINDOWS_SKIP_PROFILES.has(p))) {
-      const dir = path.posix.join(usersRoot, profile, ".claude", "orchestration");
-      if (hasTelemetry(dir)) found.push({ dir, label: `windows-${profile}` });
+      for (const client of ["claude", "codex"]) {
+        const dir = path.posix.join(usersRoot, profile, `.${client}`, "orchestration");
+        if (hasTelemetry(dir)) found.push({ dir, label: `windows-${profile}-${client}` });
+      }
     }
   }
   return found;
@@ -317,7 +322,7 @@ export function pack(options) {
   const outPath = path.resolve(options.out ?? `orchestration-telemetry-${os.hostname()}-${stamp}.zip`);
   const manifest = {
     generated_at: new Date().toISOString(),
-    generator: "orchestration-kit/claude/global/scripts/pack-telemetry.mjs",
+    generator: "orchestration-kit/runtime/scripts/pack-telemetry.mjs",
     host: os.hostname(),
     platform: isWsl() ? "wsl" : process.platform,
     options: { exclude_raw: options.excludeRaw, exclude_validation: options.excludeValidation, all_hosts: options.allHosts },

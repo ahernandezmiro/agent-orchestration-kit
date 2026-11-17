@@ -6,7 +6,7 @@
   Author: maintained with Claude Code for the frontier-model orchestration setup.
 
   Steps: verify Node >= 18 -> prompt-freeze check (prompts must stay byte-identical during the
-  evaluation period) -> claude/global/install.mjs, which replaces every kit-managed file under
+  evaluation period) -> claude/install.mjs, which replaces every kit-managed file under
   ~/.claude/orchestration, the two subagents, the lead's rules file (~/.claude/rules/orchestration-kit.md) and the permission
   rules (backing up settings.json first; CLAUDE.md is only touched to remove an old kit block). runs/ and telemetry/ are never touched.
   Fresh installs and updates use the same path. Start a new Claude Code session afterwards.
@@ -38,7 +38,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = $PSScriptRoot
-$Installer = Join-Path $RepoRoot 'claude\global\install.mjs'
+$Installer = Join-Path $RepoRoot 'claude\install.mjs'
 $PromptFreeze = Join-Path $RepoRoot 'claude\global\test\prompt-freeze.mjs'
 $MinimumNodeMajor = 18
 

@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import {
   snapshotTree, changedPaths, diffStat, parseWorkerReport, countListItems, looksLikeQuotaStop,
   groupMetrics, overlappingRuns, workerDuration
-} from "../scripts/telemetry-lib.mjs";
+} from "../../../runtime/scripts/telemetry-lib.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..", "..");
@@ -167,7 +167,7 @@ process.exit(1);
 
 function stage() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "telemetry-stage-"));
-  for (const [src, dst] of [["shared", "shared"], ["codex", "codex"], ["claude/global/scripts", "scripts"], ["claude/global/config", "config"]]) {
+  for (const [src, dst] of [["shared", "shared"], ["runtime/prompts", "prompts"], ["runtime/scripts", "scripts"], ["runtime/config", "config"]]) {
     fs.cpSync(path.join(REPO, src), path.join(dir, dst), { recursive: true });
   }
   fs.rmSync(path.join(dir, "config", "models.local.json"), { force: true });

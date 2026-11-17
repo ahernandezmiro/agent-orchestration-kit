@@ -182,7 +182,7 @@ export async function readQuotaSnapshot({ windowMinutes, readTimeoutMs }) {
 export function ongoingReservations(runs, rules, nowMs = Date.now()) {
   const windowMs = rules.windowMinutes * 60 * 1000;
   return runs
-    .filter((r) => ONGOING_STATUSES.includes(r.status) && nowMs - Date.parse(r.started_at || 0) < windowMs)
+    .filter((r) => r.backend !== "claude" && ONGOING_STATUSES.includes(r.status) && nowMs - Date.parse(r.started_at || 0) < windowMs)
     .map((r) => ({ run_id: r.run_id, role: r.role, status: r.status, started_at: r.started_at, reserved: rules.roles[r.role] ?? 0 }));
 }
 

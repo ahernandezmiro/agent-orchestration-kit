@@ -35,4 +35,4 @@ out_of_scope:
 
 ## Worker rules and report
 
-The worker-side rules and the completion report schema are defined once, in `codex/prompts/base.md` and `codex/prompts/contracts/task.md`. The wrapper adds both to every Luna/Sol prompt, so packets don't repeat them.
+The worker-side rules and the completion report schema are defined once, in `runtime/prompts/base.md` and `runtime/prompts/contracts/task.md`. The wrapper adds both to every Luna/Sol prompt, so packets don't repeat them.

@@ -30,15 +30,15 @@ you ──► Claude Code (the lead: whichever model you selected)
 
 | Role | Model | Codex sandbox | Contract returned |
 |---|---|---|---|
-| `luna-implement` | `gpt-6-luna` | workspace-write | `codex/prompts/contracts/task.md` |
-| `luna-test` | `gpt-6-luna` | workspace-write | `codex/prompts/contracts/task.md` |
-| `sol-implement` | `gpt-6-sol` | workspace-write | `codex/prompts/contracts/task.md` |
-| `astra-review` | `gpt-6-astra` | read-only | `codex/prompts/contracts/review.md` (verdict/findings/alternatives) |
-| `astra-investigate` | `gpt-6-astra` | read-only | `codex/prompts/contracts/result.md` |
+| `luna-implement` | `gpt-6-luna` | workspace-write | `runtime/prompts/contracts/task.md` |
+| `luna-test` | `gpt-6-luna` | workspace-write | `runtime/prompts/contracts/task.md` |
+| `sol-implement` | `gpt-6-sol` | workspace-write | `runtime/prompts/contracts/task.md` |
+| `astra-review` | `gpt-6-astra` | read-only | `runtime/prompts/contracts/review.md` (verdict/findings/alternatives) |
+| `astra-investigate` | `gpt-6-astra` | read-only | `runtime/prompts/contracts/result.md` |
 
 All roles use reasoning effort `high` (the companion accepts at most `xhigh`; override per run with `--effort`).
 
-The table shows the original values. Since the kit moved to the `orchestration-kit` repo, the model and default effort per role come from `claude/global/config/models.json` (installed to `~/.claude/orchestration/config/`), with an optional per-machine `models.local.json`. Run `node ~/.claude/orchestration/scripts/codex-delegate.mjs models` to see the effective selection. Every run record stores the `model` and `effort` actually used.
+The table shows the original values. Since the kit moved to the `orchestration-kit` repo, the model and default effort per role come from `runtime/config/models.json` (installed to `~/.claude/orchestration/config/`), with an optional per-machine `models.local.json`. Run `node ~/.claude/orchestration/scripts/codex-delegate.mjs models` to see the effective selection. Every run record stores the `model` and `effort` actually used.
 
 ---
 
@@ -70,7 +70,7 @@ Other modes (`deploy.ps1` switch / `deploy.sh` flag):
 - `-Uninstall -Purge` / `--uninstall --purge` also deletes that data.
 - `-AllowPromptChange` / `--allow-prompt-change` skips the prompt-freeze guard (only after the evaluation is closed).
 
-Each deploy deletes and re-copies the kit-managed folders under `~/.claude/orchestration` (`shared, codex, claude, scripts, templates, config`), so files removed from the kit disappear too. It also writes `deployed.json` with the commit and effective models.
+Each deploy refreshes the shared runtime under `~/.claude/orchestration`. It records the commit and effective models in `deployed.json`. To install or update only the worker gateways, run `node claude/install.mjs --runtime-only` from the kit root.
 
 ---
 
@@ -99,18 +99,18 @@ The plugin's own `codex:codex-rescue` agent was not reused for the roles, for th
 
 ### Step 3: Write the wrapper and agents (BOOTSTRAP actions 3, 7, 8, 9)
 
-Source files in the kit (`claude/global/`), with where the installer copies them:
+Runtime and Claude Code integration files and their install locations:
 
 | Kit source | Installed to | Purpose |
 |---|---|---|
-| `scripts/codex-delegate.mjs` | `~/.claude/orchestration/scripts/` | role-pinned delegation, blind-review key filter, git guard, telemetry; commands `run/status/result/cancel/collect/abandon/worktree-apply/worktree-clean/verify-git/which/runs/show/assess/record-skip/metrics`; uses `telemetry-lib.mjs` for tree snapshots and attribution |
+| `runtime/scripts/{codex,claude}-delegate.mjs` | `~/.claude/orchestration/scripts/` | both gateways use the same packet handling, git guard, job lifecycle, and telemetry |
 | `agents/luna-worker.md` | `~/.claude/agents/` | forwards a task packet to `luna-implement` / `luna-test` / `sol-implement` |
 | `agents/astra-reviewer.md` | `~/.claude/agents/` | forwards a review packet to `astra-review` / `astra-investigate` |
-| `templates/task-packet.yaml`, `review-packet.yaml` | `~/.claude/orchestration/templates/` | packet starting points |
+| `runtime/templates/` | `~/.claude/orchestration/templates/` | packet starting points |
 | `CLAUDE.orchestration.md` | generated into `~/.claude/rules/orchestration-kit.md` by `scripts/rules-file.mjs`, followed by the routing policy and identity rules | role table, workflow, observability, blind-review and git rules |
-| `scripts/managed-block.mjs` | `~/.claude/orchestration/scripts/` | id-scoped marker blocks; used only to remove the old `CLAUDE.md` block; refuses unmatched, duplicate or nested markers |
 | `settings.permissions.json` | merged into `~/.claude/settings.json` | allow the wrapper; *ask* before `git push/merge/rebase/reset --hard/remote/filter-*` and `commit --amend` |
-| `../../shared`, `../../codex`, `../*.md` | `~/.claude/orchestration/{shared,codex,claude}/` | `codex/prompts/` is what the wrapper assembles into worker prompts; the rest is policy the lead reads on demand (the routing policy and identity rules are also copied into the rules file) |
+| `runtime/prompts/` | `~/.claude/orchestration/prompts/` | worker rules, role prompts, and result formats |
+| `shared/`, `codex/*.md`, `claude/*.md` | `~/.claude/orchestration/{shared,codex,claude}/` | policy and reference material |
 
 Design decisions:
 - **Blindness is enforced by structure, not convention.** The subagents start with no conversation context, and the wrapper sends only allowlisted packet keys (`id, role, requirements, constraints, context, artifact, focus, out_of_scope`) for `astra-review`, printing `BLIND REVIEW: stripped …` for anything else.
@@ -164,12 +164,12 @@ claude/ORCHESTRATION_TELEMETRY_PROPOSAL.md  ← telemetry design notes (step 6)
 claude/global/install.mjs                ← installer (--check | --dry-run | --uninstall [--purge])
 claude/global/CLAUDE.orchestration.md
 claude/global/settings.permissions.json
-claude/global/scripts/codex-delegate.mjs
-claude/global/scripts/quota-gate.mjs     ← Codex quota read + gate (used by `run` and `quota`)
-claude/global/config/models.json         ← model + default effort per role (models.local.json: per-machine, gitignored)
-claude/global/config/quota.json          ← quota-gate threshold/reservation per role
+runtime/scripts/codex-delegate.mjs
+runtime/scripts/quota-gate.mjs     ← Codex quota read + gate (used by `run` and `quota`)
+runtime/config/models.json         ← model + default effort per role (models.local.json: per-machine, gitignored)
+runtime/config/quota.json          ← quota-gate threshold/reservation per role
 claude/global/agents/{luna-worker,astra-reviewer}.md
-claude/global/templates/{task-packet,review-packet}.yaml
+runtime/templates/{task-packet,review-packet}.yaml
 claude/global/test/create-playground.mjs
 claude/global/test/{T001-slugify,T002-forbidden-git,R001-slug-registry,I001-investigate}.yaml
 claude/global/test/prompt-freeze.mjs     ← prompt-freeze guard; golden/ holds the baseline prompts
@@ -187,7 +187,7 @@ Edit files in the repo (the source of truth), commit, then run the deploy script
 | Preflight failure | Fix |
 |---|---|
 | `codex CLI on PATH` / `codex logged in` | Install Codex and run `codex login` (manual: user's subscription) |
-| `model id …` missing | Check `~/.codex/models_cache.json` (`models[].slug`). The cache lists models a newer CLI may still reject, so confirm with `codex exec --skip-git-repo-check --sandbox read-only --model <id> "Reply OK"`. Then change `claude/global/config/models.json` (all machines: commit and push) or `models.local.json` (this machine only), and redeploy. The preflight reads the required ids from that config |
+| `model id …` missing | Check `~/.codex/models_cache.json` (`models[].slug`). The cache lists models a newer CLI may still reject, so confirm with `codex exec --skip-git-repo-check --sandbox read-only --model <id> "Reply OK"`. Then change `runtime/config/models.json` (all machines: commit and push) or `models.local.json` (this machine only), and redeploy. The preflight reads the required ids from that config |
 | `QUOTA GATE: BLOCKED … quota unknown` on every run | Neither `codex app-server` (`account/rateLimits/read`) nor a recent rollout in `~/.codex/sessions` gave a 5h window. Run `codex-delegate.mjs quota` to see the source errors; check `codex login`, or set `CODEX_BIN` if `codex` is not on PATH |
 | `model config` | `models.json` / `models.local.json` is invalid (bad JSON, unknown role, missing model, effort outside `none…xhigh`); the message names the file and role |
 | OpenAI `codex` Claude plugin not found | Install OpenAI's `codex` plugin (codex-plugin-cc) in Claude Code / the desktop app (manual). If it lives somewhere unusual, set the env var `CODEX_COMPANION` to the full path of `codex-companion.mjs` |

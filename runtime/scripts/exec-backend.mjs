@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { looksLikeQuotaStop } from "./telemetry-lib.mjs";
+import { readClaudeOutput } from "./claude-backend.mjs";
 
 const RUNNER = fileURLToPath(new URL("./exec-runner.mjs", import.meta.url));
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
@@ -36,13 +37,18 @@ function terminal(state) {
  * Input: optional environment and platform override. Output: executable descriptor or failure reason.
  */
 export function resolveCodexBin({ env = process.env, platform = process.platform } = {}) {
+  const { version, ...descriptor } = resolveWorkerBin("codex", "CODEX_BIN", { env, platform });
+  return descriptor;
+}
+
+export function resolveWorkerBin(name, envKey, { env = process.env, platform = process.platform } = {}) {
   let command;
   let prefixArgs = [];
   let source;
-  if (env.CODEX_BIN) {
-    command = path.resolve(process.cwd(), env.CODEX_BIN);
-    source = "CODEX_BIN";
-    if (!fs.existsSync(command)) return { ok: false, reason: "missing", detail: `CODEX_BIN does not exist: ${command}` };
+  if (env[envKey]) {
+    command = path.resolve(process.cwd(), env[envKey]);
+    source = envKey;
+    if (!fs.existsSync(command)) return { ok: false, reason: "missing", detail: `${envKey} does not exist: ${command}` };
     if (/\.(?:mjs|js|cjs)$/i.test(command)) {
       prefixArgs = [command];
       command = process.execPath;
@@ -51,33 +57,33 @@ export function resolveCodexBin({ env = process.env, platform = process.platform
     const pathValue = env.PATH ?? env.Path ?? "";
     const dirs = pathValue.split(path.delimiter).filter(Boolean);
     if (platform === "win32") {
-      const exe = dirs.map((d) => path.join(d, "codex.exe")).find((p) => fs.existsSync(p));
+      const exe = dirs.map((d) => path.join(d, `${name}.exe`)).find((p) => fs.existsSync(p));
       if (exe) { command = exe; source = "PATH"; }
       else {
-        const shim = dirs.flatMap((d) => [path.join(d, "codex.cmd"), path.join(d, "codex.ps1")])
+        const shim = dirs.flatMap((d) => [path.join(d, `${name}.cmd`), path.join(d, `${name}.ps1`)])
           .find((p) => fs.existsSync(p));
-        if (shim) return { ok: false, reason: "unsupported_shim", detail: `Found ${shim}; set CODEX_BIN to codex.exe or the npm package's JavaScript entry.` };
-        return { ok: false, reason: "missing", detail: "codex.exe was not found on PATH" };
+        if (shim) return { ok: false, reason: "unsupported_shim", detail: `Found ${shim}; set ${envKey} to ${name}.exe or the npm package's JavaScript entry.` };
+        return { ok: false, reason: "missing", detail: `${name}.exe was not found on PATH` };
       }
     } else {
-      const candidate = dirs.map((d) => path.join(d, "codex")).find((p) => {
+      const candidate = dirs.map((d) => path.join(d, name)).find((p) => {
         try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; }
       });
-      if (!candidate) return { ok: false, reason: "missing", detail: "codex was not found on PATH" };
+      if (!candidate) return { ok: false, reason: "missing", detail: `${name} was not found on PATH` };
       command = candidate;
       source = "PATH";
     }
   }
 
   const probe = spawnSync(command, [...prefixArgs, "--version"], {
-    encoding: "utf8", timeout: 10000, windowsHide: true, shell: false
+    env, encoding: "utf8", timeout: 10000, windowsHide: true, shell: false
   });
   if (probe.error?.code === "ENOENT") return { ok: false, reason: "missing", detail: probe.error.message };
   if (probe.error || probe.status !== 0) {
     const detail = probe.error?.message || probe.stderr?.trim() || `--version exited with ${probe.status}`;
     return { ok: false, reason: "broken", detail };
   }
-  return { ok: true, command, prefixArgs, source };
+  return { ok: true, command, prefixArgs, source, version: probe.stdout?.trim() };
 }
 
 /**
@@ -152,11 +158,11 @@ export function normalizeExecResult({ state, events, finalMessageExists }) {
  * Create a job and launch its detached runner.
  * Input: job paths, command vector, cwd and optional startup timeout. Output: Promise<{ state }> after runner acknowledgement or timeout.
  */
-export async function submitJob({ jobDir, command, prefixArgs = [], args, cwd, promptFile, startupTimeoutMs = 10000 }) {
+export async function submitJob({ jobDir, command, prefixArgs = [], args, cwd, promptFile, format, envUnset = [], startupTimeoutMs = 10000 }) {
   fs.mkdirSync(jobDir, { recursive: true });
   const absDir = path.resolve(jobDir);
-  atomicJson(path.join(absDir, "spec.json"), { command, prefixArgs, args, cwd, promptFile, env_unset: [] });
-  atomicJson(path.join(absDir, "state.json"), { status: "pending", submitted_at: new Date().toISOString(),
+  atomicJson(path.join(absDir, "spec.json"), { command, prefixArgs, args, cwd, promptFile, env_unset: envUnset });
+  atomicJson(path.join(absDir, "state.json"), { format, status: "pending", submitted_at: new Date().toISOString(),
     runner_pid: null, child_pid: null, started_at: null, finished_at: null, exit_code: null,
     signal: null, spawn_error: null, io_error: null });
   const runner = spawn(process.execPath, [RUNNER, absDir], { detached: true, stdio: "ignore", windowsHide: true, shell: false });
@@ -180,8 +186,11 @@ export function readJob(jobDir) {
   if (!terminal(state)) return { state, events: null, finalMessage: null, stderrTail: "" };
   const read = (file) => { try { return fs.readFileSync(path.join(jobDir, file), "utf8"); } catch { return ""; } };
   const stderr = read("stderr.txt");
-  return { state, events: summarizeEvents(read("events.jsonl")), finalMessage: read("last-message.txt") || null,
-    stderrTail: stderr.slice(-4096) };
+  const output = read("events.jsonl");
+  const parsed = state.format === "claude" ? readClaudeOutput(output) : {
+    events: summarizeEvents(output), finalMessage: read("last-message.txt") || null
+  };
+  return { state, ...parsed, stderrTail: stderr.slice(-4096) };
 }
 
 /**

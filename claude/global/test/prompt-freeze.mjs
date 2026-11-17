@@ -25,6 +25,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { buildRulesFile } from "../scripts/rules-file.mjs";
+import { installRuntime } from "../../../runtime/install-runtime.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..", "..");
@@ -61,7 +62,8 @@ function staticPromptFiles() {
     "claude/global/CLAUDE.orchestration.md",
     ...list("claude/global/agents", (n) => n.endsWith(".md")),
     ...list("codex", (n) => n.endsWith(".md")),
-    ...recursiveList("codex/prompts"),
+    ...recursiveList("codex/lead-skill"),
+    ...recursiveList("runtime/prompts"),
     "shared/ROUTING_POLICY.md",
     "shared/TASK_CONTRACT.md",
     "shared/REVIEW_CONTRACT.md",
@@ -78,30 +80,12 @@ function sha256(file) {
 }
 
 /**
- * Recursively copy a directory (Node 18 compatible, no fs.cpSync dependency).
- * Input: source and destination absolute paths. Output: none.
- */
-function copyDir(src, dst) {
-  fs.mkdirSync(dst, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const s = path.join(src, entry.name);
-    const d = path.join(dst, entry.name);
-    if (entry.isDirectory()) copyDir(s, d);
-    else fs.copyFileSync(s, d);
-  }
-}
-
-/**
  * Build a throwaway copy of the installed ~/.claude/orchestration layout.
  * Input: none. Output: { stage, companion } absolute paths; caller removes stage.
  */
 function stageInstalledLayout() {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), "prompt-freeze-"));
-  copyDir(path.join(REPO, "shared"), path.join(stage, "shared"));
-  copyDir(path.join(REPO, "codex"), path.join(stage, "codex"));
-  copyDir(path.join(REPO, "claude", "global", "scripts"), path.join(stage, "scripts"));
-  const config = path.join(REPO, "claude", "global", "config");
-  if (fs.existsSync(config)) copyDir(config, path.join(stage, "config"));
+  installRuntime(stage);
   // Dry runs only need the companion path to exist; it is never executed.
   const companion = path.join(stage, "stub-codex-companion.mjs");
   fs.writeFileSync(companion, "process.exit(99);\n");

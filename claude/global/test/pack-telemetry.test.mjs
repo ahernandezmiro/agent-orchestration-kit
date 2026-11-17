@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
-import { pack } from "../scripts/pack-telemetry.mjs";
+import { pack } from "../../../runtime/scripts/pack-telemetry.mjs";
 
 /**
  * Input: none. Output: { root, out } — a staged orchestration dir with runs, validation runs,

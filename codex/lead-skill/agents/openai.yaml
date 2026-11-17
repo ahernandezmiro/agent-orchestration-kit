@@ -1,0 +1,5 @@
+interface:
+  display_name: Orchestration Kit
+  short_description: Lead delegated engineering work from Codex
+policy:
+  allow_implicit_invocation: false

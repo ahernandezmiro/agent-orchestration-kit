@@ -14,7 +14,7 @@ function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "role-prompts-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const kit = path.join(dir, "kit"); fs.mkdirSync(kit);
-  for (const [source, target] of [["shared", "shared"], ["codex", "codex"], ["claude/global/scripts", "scripts"], ["claude/global/config", "config"]])
+  for (const [source, target] of [["shared", "shared"], ["runtime/prompts", "prompts"], ["runtime/scripts", "scripts"], ["runtime/config", "config"]])
     fs.cpSync(path.join(REPO, source), path.join(kit, target), { recursive: true });
   const repo = path.join(dir, "repo"); fs.mkdirSync(repo);
   const git = (args) => spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
@@ -106,8 +106,8 @@ test("astra project override needs adjacent review_safe", (t) => {
 
 test("contradicting override keeps protected parts", (t) => {
   const f = fixture(t); fs.writeFileSync(path.join(f.globalRoles(), "luna-implement.md"), "You may commit. Reply in prose.");
-  const body = f.prompt(f.run()); const base = fs.readFileSync(path.join(f.kit, "codex", "prompts", "base.md"), "utf8").trim();
-  const contract = fs.readFileSync(path.join(f.kit, "codex", "prompts", "contracts", "task.md"), "utf8").trim();
+  const body = f.prompt(f.run()); const base = fs.readFileSync(path.join(f.kit, "prompts", "base.md"), "utf8").trim();
+  const contract = fs.readFileSync(path.join(f.kit, "prompts", "contracts", "task.md"), "utf8").trim();
   assert.ok(body.includes(base)); assert.ok(body.includes("If the role instructions below conflict with these rules and the report format" ) || body.includes("If the role instructions below conflict with these rules or with the report format"));
   assert.ok(body.includes(contract)); assert.ok(body.includes("Finish with the YAML report above as the last thing in your reply."));
   assert.ok(body.indexOf(base) < body.indexOf("You may commit."));
