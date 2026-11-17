@@ -2,7 +2,10 @@
 
 ## Primary roles
 
-### Opus 5.5 — Primary orchestrator / lead
+### Lead — primary orchestrator
+
+The lead is the model the user selected for this session; these rules apply whichever model that is.
+
 Use for:
 - product requirements and specification writing
 - architecture and system design
@@ -15,7 +18,7 @@ Use for:
 - synthesis of competing proposals
 - final review/sign-off
 
-Do not waste Opus by default on:
+Do not spend the lead by default on:
 - mechanical edits
 - repetitive refactors
 - boilerplate
@@ -53,7 +56,7 @@ Do not make Sol mandatory. It is an optional tier.
 
 ### GPT-6 Astra — Independent reviewer / alternative-design specialist
 Use for:
-- third-party review of Opus feature designs
+- third-party review of the lead's feature designs
 - architecture challenge
 - alternative solution generation
 - hidden-assumption discovery
@@ -72,7 +75,7 @@ These rules apply on top of the tables below. Each one names the evidence it cam
 
 1. **Packet size: aim for a 5–15 minute worker run.** If you expect a packet to take longer than about 15 minutes, split it into sequential packets with their own acceptance criteria. *Evidence:* Luna runs of 5–15 min had 52% accepted, 15–30 min runs 29%.
 2. **Spec review before multi-packet phases.** Before dispatching a phase of two or more implementation packets, get a blind Astra review of the phase spec. *Evidence:* Gordi had no Astra reviews and 30% accepted. Midnight Tavern's phases without a spec review had 0 of 7 accepted; later phases with one did better. Reviews take about 4 minutes.
-3. **Discovery stays with Opus.** Don't hand Luna a packet whose correct behaviour is unknown, such as undecoded game rules or unverified formats. Opus (with Astra for hard cases) establishes the behaviour first, then Luna implements it. *Evidence:* the first Gordi reconstructions needed major rework because mechanics were invented; once Opus supplied the decoded rules, the rebuilds were mostly accepted.
+3. **Discovery stays with the lead.** Don't hand Luna a packet whose correct behaviour is unknown, such as undecoded game rules or unverified formats. The lead (with Astra for hard cases) establishes the behaviour first, then Luna implements it. *Evidence:* the first Gordi reconstructions needed major rework because mechanics were invented; once the lead supplied the decoded rules, the rebuilds were mostly accepted.
 4. **Engine work needs a runtime smoke test.** Packets for Godot/Unity/Unreal or other integrated apps must include a `required_checks` entry that starts the engine or app and exercises the changed flow (headless run, autoplay bot, scene load). Unit tests alone don't count as acceptance. Put it in the project's `.orchestration/project.json` so every packet gets it. *Evidence:* Midnight Tavern p4/p6 passed unit tests while the integrated game was broken.
 5. **Algorithm-heavy work starts with a feasibility spike.** For DSP and other numerically hard features, first dispatch a short spike packet with a measurable pass/fail target (for example latency, error bound or an eval-harness score), then the full implementation. Consider Sol for the core algorithm when Luna's spike stubs it. *Evidence:* rtmod p2a stubbed the PSOLA core; Sol implemented it from a pseudocode-level spec.
 6. **One test per acceptance criterion.** Write criteria so each one maps to a test, and check that mapping in review. A missing test is a `test_gap`, even when the worker reports `completed`. *Evidence:* every 2026-10 test-gap rework (c1, d4, d2, f5, worktree-isolation attempt 1) was fixed by a second pass that only added the missing tests.
@@ -81,20 +84,20 @@ These rules apply on top of the tables below. Each one names the evidence it cam
 
 | Phase | Primary | Secondary / review |
 |---|---|---|
-| Requirements | Opus | Astra for important/ambiguous work |
-| Architecture | Opus | Astra independent review |
-| Feature design / GDD | Opus | Astra independent proposal/review |
+| Requirements | Lead | Astra for important/ambiguous work |
+| Architecture | Lead | Astra independent review |
+| Feature design / GDD | Lead | Astra independent proposal/review |
 | Implementation | Luna | Sol/Astra only on escalation |
-| Tests | Luna | Opus reviews test strategy for critical systems |
-| Debugging | Opus or Luna depending scope | Astra for hard systemic issues |
-| Code review | Opus | Astra for high-risk changes |
-| 2D pipeline | Opus | Astra review; Luna implements tooling |
-| 3D pipeline | Opus | Astra review; Luna implements tooling |
-| Video pipeline | Opus | Astra review; Luna implements tooling |
+| Tests | Luna | Lead reviews test strategy for critical systems |
+| Debugging | Lead or Luna depending scope | Astra for hard systemic issues |
+| Code review | Lead | Astra for high-risk changes |
+| 2D pipeline | Lead | Astra review; Luna implements tooling |
+| 3D pipeline | Lead | Astra review; Luna implements tooling |
+| Video pipeline | Lead | Astra review; Luna implements tooling |
 
 ## Independent review rule
 
-For important work, do NOT give Astra the full Opus conversation or Opus hidden reasoning.
+For important work, do NOT give Astra the lead's full conversation or hidden reasoning.
 Give Astra only:
 - original requirements
 - constraints
@@ -109,16 +112,16 @@ Ask Astra to:
 - propose alternatives
 - state trade-offs
 
-Then give Astra's review back to Opus for synthesis.
+Then give Astra's review back to the lead for synthesis.
 
 ## Escalation ladder
 
 1. Luna attempts bounded implementation.
 2. Luna may self-correct once if failure is local and objective.
-3. If still blocked, Opus diagnoses whether the issue is spec ambiguity or implementation difficulty.
+3. If still blocked, the lead diagnoses whether the issue is spec ambiguity or implementation difficulty.
 4. If implementation difficulty: optionally route to Sol.
 5. If architectural/systemic/novel: route to Astra.
-6. Opus owns final synthesis and scope control.
+6. The lead owns final synthesis and scope control.
 
 ## Review severity policy
 

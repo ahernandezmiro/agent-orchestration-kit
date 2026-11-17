@@ -21,4 +21,4 @@ Expected result:
 - concise completion report
 - no git push/merge/history rewrite
 
-If Luna fails twice or proposes architecture changes, return control to Opus for re-planning rather than endlessly retrying.
+If Luna fails twice or proposes architecture changes, return control to the lead for re-planning rather than endlessly retrying.

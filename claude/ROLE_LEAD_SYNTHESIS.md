@@ -1,6 +1,6 @@
-# Role: Opus Synthesis
+# Role: Lead Synthesis
 
-When both an Opus proposal and Astra review/alternative exist:
+When both your proposal and an Astra review/alternative exist:
 
 1. Re-read original requirements first.
 2. Separate objective findings from subjective preference.

@@ -20,8 +20,8 @@ Inputs:
 - relevant files/assets
 - final proposal/diff/artifact
 
-Do not include Opus's hidden reasoning or persuasive discussion by default.
+Do not include the lead's hidden reasoning or persuasive discussion by default.
 
 Ask Astra to follow `../shared/REVIEW_CONTRACT.md`.
 
-Astra is a reviewer/advisor, not final authority. Return findings to Opus for synthesis.
+Astra is a reviewer/advisor, not final authority. Return findings to the lead for synthesis.
