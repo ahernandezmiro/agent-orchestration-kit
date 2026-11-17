@@ -42,8 +42,10 @@ test("editRulesFor maps directories, files and globs and rejects unsafe entries"
     [["*"], /matches the whole working directory/], [["**"], /matches the whole working directory/], [["./**/*"], /matches the whole working directory/],
     [["*/?"], /matches the whole working directory/], [["src/", ".git/hooks"], /reaches \.git or \.claude/], [[".claude"], /reaches/],
     [["pkg/.GIT/config"], /reaches/],
-    [[".g*/hooks"], /could match/], [[".[Gg]it/config"], /could match/], [["{.git}/x"], /could match/], [["?claude/x"], /could match/],
-    [["*t/config"], /could match/], [["pkg/.CL*"], /could match/], [["[.]git"], /could match/]
+    [[".g*/hooks"], /could match/], [["?claude/x"], /could match/], [["*t/config"], /could match/], [["pkg/.CL*"], /could match/],
+    [[".[Gg]it/config"], /uses \[, \], \{, \}, : or ~/], [["{.git}/x"], /uses \[/], [["[.]git"], /uses \[/], [["src/[]]x"], /uses \[/],
+    [[".git:stream"], /uses \[/], [["GIT~1/config"], /uses \[/], [["src/a~b"], /uses \[/],
+    [[".git./config"], /reaches/], [["pkg/.CLAUDE.../x"], /reaches/], [[".gi?./x"], /could match/], [["src/.../x"], /only of dots/]
   ]) assert.match(editRulesFor(entries, cwd).error, message, JSON.stringify(entries));
 });
 

@@ -23,28 +23,12 @@ function caseVariants(name) {
 }
 const PROTECTED_DENY = PROTECTED_DIRS.flatMap(caseVariants).flatMap((name) => [`Edit(**/${name})`, `Edit(**/${name}/**)`]);
 
-// True when one glob path segment (*, ?, [class], {a}) matches a protected name, ignoring case.
+// True when one path segment using only literals, * and ? matches a protected name, ignoring
+// case. editRulesFor rejects classes and braces before this runs, so nothing else needs parsing.
 function globCouldMatchProtected(segment) {
-  if (!/[*?[\]{}]/.test(segment)) return false;
-  let source = "";
-  for (let i = 0; i < segment.length; i++) {
-    const ch = segment[i];
-    if (ch === "*") source += ".*";
-    else if (ch === "?") source += ".";
-    else if (ch === "[") {
-      const end = segment.indexOf("]", i + 1);
-      if (end < 0) return true; // malformed class: refuse rather than guess
-      source += `[${segment.slice(i + 1, end).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
-      i = end;
-    } else if (ch === "{") {
-      const end = segment.indexOf("}", i + 1);
-      if (end < 0) return true;
-      source += `(?:${segment.slice(i + 1, end).replace(/[.+^$()|\\]/g, "\\$&")})`;
-      i = end;
-    } else source += ch.replace(/[.+^$()|\\]/g, "\\$&");
-  }
-  const regex = new RegExp(`^${source}$`, "i");
-  return PROTECTED_DIRS.some((name) => regex.test(name));
+  if (!/[*?]/.test(segment)) return false;
+  const source = [...segment].map((ch) => (ch === "*" ? ".*" : ch === "?" ? "." : ch.replace(/[.+^$|\\]/g, "\\$&"))).join("");
+  return PROTECTED_DIRS.some((name) => new RegExp(`^${source}$`, "i").test(name));
 }
 
 /** cwd-relative posix paths whose case-folded segments include a protected name. */
@@ -101,14 +85,21 @@ export function editRulesFor(entries, cwd) {
     if (/[\s,()]/.test(entry)) return { error: `editable_paths entry '${raw}' contains whitespace, a comma or a parenthesis` };
     if (entry.startsWith("/") || entry.startsWith("~") || /^[A-Za-z]:/.test(entry)) return { error: `editable_paths entry '${raw}' must be relative to --cwd` };
     if (entry.split("/").includes("..")) return { error: `editable_paths entry '${raw}' must not contain '..'` };
+    // Fail closed on syntax whose meaning differs between this check, the CLI's glob matcher and
+    // the file system: classes and braces ([...], {...}), Windows streams (name:stream) and 8.3
+    // short names (GIT~1). Only literal names plus * and ? are accepted.
+    if (/[[\]{}:~]/.test(entry)) return { error: `editable_paths entry '${raw}' uses [, ], {, }, : or ~; use literal names with * or ? only` };
     const relative = entry.replace(/^(\.\/)+/, "");
     if (!relative || relative === ".") return { error: `editable_paths entry '${raw}' names the whole working directory; list paths instead` };
     const segments = relative.split("/").filter(Boolean);
     if (segments.every((segment) => /^[*?]+$/.test(segment))) return { error: `editable_paths entry '${raw}' matches the whole working directory; list paths instead` };
-    if (segments.some((segment) => PROTECTED_DIRS.includes(segment.toLowerCase()))) return { error: `editable_paths entry '${raw}' reaches ${PROTECTED_DIRS.join(" or ")}, which workers may not edit` };
-    // A glob segment such as .g*, .[Gg]it, {.git} or ?git could match a protected name. Bare * and
-    // ** segments are needed for ordinary entries (src/**) and are covered by the deny rules.
-    if (segments.some((segment) => !/^\*{1,2}$/.test(segment) && globCouldMatchProtected(segment))) {
+    // Windows drops trailing dots from a name, so `.git.` reaches .git; compare without them.
+    const normalized = segments.map((segment) => segment.replace(/\.+$/, ""));
+    if (normalized.some((segment) => !segment)) return { error: `editable_paths entry '${raw}' has a segment made only of dots` };
+    if (normalized.some((segment) => PROTECTED_DIRS.includes(segment.toLowerCase()))) return { error: `editable_paths entry '${raw}' reaches ${PROTECTED_DIRS.join(" or ")}, which workers may not edit` };
+    // A glob segment such as .g*, ?git or *t could match a protected name. Bare * and ** segments
+    // are needed for ordinary entries (src/**) and are covered by the deny rules.
+    if (normalized.some((segment) => !/^\*{1,2}$/.test(segment) && globCouldMatchProtected(segment))) {
       return { error: `editable_paths entry '${raw}' has a glob segment that could match ${PROTECTED_DIRS.join(" or ")}; name those paths literally` };
     }
     const glob = /[*?[\]{}]/.test(relative);
