@@ -72,7 +72,7 @@ export function loadRunWindows(runsDir) {
 
 /**
  * Stream transcripts and collect one usage record per assistant message id.
- * Input: projects dir. Output: Promise<[{ ts, cwd, model, input, cache_creation, cache_read, output }]>.
+ * Input: projects dir. Output: Promise<[{ ts, cwd, model, sidechain, input, cache_creation, cache_read, output }]>.
  */
 export async function loadUsage(projectsDir) {
   const seen = new Set();
@@ -92,6 +92,8 @@ export async function loadUsage(projectsDir) {
       const u = msg.usage;
       out.push({
         ts: Date.parse(rec.timestamp), cwd: norm(rec.cwd), model: msg.model || "unknown",
+        // Subagent transcripts (the kit's forwarders, Explore, …) are part of the lead's effort but are not the lead.
+        sidechain: rec.isSidechain === true,
         input: u.input_tokens || 0, cache_creation: u.cache_creation_input_tokens || 0,
         cache_read: u.cache_read_input_tokens || 0, output: u.output_tokens || 0
       });
@@ -102,8 +104,8 @@ export async function loadUsage(projectsDir) {
 
 /**
  * Attribute usage records to run windows.
- * Input: windows, usage. Output: per-run rows; lead_models is the sorted list of distinct models
- * seen in the run's window.
+ * Input: windows, usage. Output: per-run rows. Token sums include subagent messages; lead_models is
+ * the sorted list of distinct models of the main (non-sidechain) session messages in the window.
  */
 export function attribute(windows, usage) {
   return windows.map((w) => {
@@ -115,7 +117,8 @@ export function attribute(windows, usage) {
       window_min: Math.round((w.to - w.from) / 60000),
       messages: hits.length, input: sum("input"), cache_creation: sum("cache_creation"),
       cache_read: sum("cache_read"), output: sum("output"), overlap,
-      lead_models: [...new Set(hits.map((u) => u.model))].sort()
+      // "<synthetic>" marks messages Claude Code writes itself (errors, limit notices), not model output.
+      lead_models: [...new Set(hits.filter((u) => !u.sidechain && u.model !== "<synthetic>").map((u) => u.model))].sort()
     };
   });
 }

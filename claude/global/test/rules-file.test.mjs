@@ -78,3 +78,19 @@ test("freeze manifest pins the generated rules file", () => {
   const expected = crypto.createHash("sha256").update(buildRulesFile({ kitRoot: REPO, commit: "<commit>" })).digest("hex");
   assert.equal(manifest["generated/orchestration-kit.rules.md"], expected);
 });
+
+test("the manual command in GLOBAL_INSTALL.md writes a UTF-8 rules file", async (t) => {
+  const { spawnSync } = await import("node:child_process");
+  const doc = fs.readFileSync(path.join(REPO, "claude", "GLOBAL_INSTALL.md"), "utf8");
+  const command = doc.match(/```bash\r?\n(node --input-type=module -e .*buildRulesFile.*)\r?\n```/)?.[1];
+  assert.ok(command, "manual rules-file command not found in GLOBAL_INSTALL.md");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rules-manual-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  // The documented command must write the file itself, so the shell's redirection encoding never matters.
+  const script = command.match(/-e "(.*)"$/)[1];
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { cwd: REPO, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } });
+  assert.equal(r.status, 0, r.stderr);
+  const written = fs.readFileSync(path.join(home, ".claude", "rules", RULES_FILE_NAME));
+  assert.equal(written.subarray(0, 4).toString("utf8"), "<!--");
+  assert.equal(written.toString("utf8"), buildRulesFile({ kitRoot: REPO, commit: null }));
+});

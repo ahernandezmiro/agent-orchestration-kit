@@ -209,7 +209,7 @@ function install() {
   });
   if (claudeMd.error) {
     console.error(`${CLAUDE_MD}: ${claudeMd.error.problem} at line(s) ${claudeMd.error.lines.join(", ")}`);
-    console.error("the old block is still in CLAUDE.md; remove it by hand");
+    console.error("the old block is still in CLAUDE.md and will load alongside the rules file; remove it by hand");
     process.exitCode = 1;
   } else if (claudeMd.changed) {
     act(`remove the old managed block from ${CLAUDE_MD}`, () => {

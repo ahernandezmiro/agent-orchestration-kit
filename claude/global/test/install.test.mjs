@@ -103,7 +103,7 @@ test("malformed markers: rules file installed, CLAUDE.md untouched, non-zero exi
   assert.equal(fs.readFileSync(f.claudeMd, "utf8"), malformed);
   assert.ok(result.stderr.includes(f.claudeMd));
   assert.match(result.stderr, /unmatched-begin/);
-  assert.match(result.stderr, /remove it by hand/);
+  assert.match(result.stderr, /will load alongside the rules file; remove it by hand/);
   assert.ok(fs.existsSync(f.rulesFile));
   assert.ok(fs.existsSync(path.join(f.claude, "agents", "luna-worker.md")));
   // Uninstall still refuses before touching anything.

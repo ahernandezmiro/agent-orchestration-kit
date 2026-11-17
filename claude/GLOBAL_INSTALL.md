@@ -56,11 +56,13 @@ On Linux/WSL: `./deploy.sh --check`, then `./deploy.sh`.
 
 Then **start a new Claude Code session**. Agents and rules files only load at session start. Run the validation in section 6.
 
-The installer never writes `~/.claude/CLAUDE.md`, except to remove, once and with a backup, the block that older kit versions put there. If that block's markers are malformed, the file is left alone and the install exits non-zero after doing everything else; remove the block by hand. A rules file you edited by hand is copied to `~/.claude/orchestration/backups/` before it is overwritten. To do the rules-file step by hand, run this from the kit root and save the output as `~/.claude/rules/orchestration-kit.md`:
+The installer never writes `~/.claude/CLAUDE.md`, except to remove, once and with a backup, the block that older kit versions put there. If that block's markers are malformed, the file is left alone and the install exits non-zero after doing everything else; remove the block by hand. A rules file you edited by hand is copied to `~/.claude/orchestration/backups/` before it is overwritten. To do the rules-file step by hand, run this from the kit root. It writes `~/.claude/rules/orchestration-kit.md` itself, as UTF-8 (redirecting output with `>` in Windows PowerShell 5.1 would write UTF-16):
 
 ```bash
-node --input-type=module -e "import { buildRulesFile } from './claude/global/scripts/rules-file.mjs'; process.stdout.write(buildRulesFile({ kitRoot: process.cwd(), commit: null }))"
+node --input-type=module -e "import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import { buildRulesFile } from './claude/global/scripts/rules-file.mjs'; const dir = path.join(os.homedir(), '.claude', 'rules'); fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'orchestration-kit.md'), buildRulesFile({ kitRoot: process.cwd(), commit: null }))"
 ```
+
+To go back to a kit version from before 2026-11-17, run `--uninstall` from this version first, or delete `~/.claude/rules/orchestration-kit.md` by hand. Older installers put their block back in `~/.claude/CLAUDE.md` but don't know about the rules file, so without this the lead would load both instruction sets.
 
 Other modes (`deploy.ps1` switch / `deploy.sh` flag):
 - `-DryRun` / `--dry-run` shows what would change.
