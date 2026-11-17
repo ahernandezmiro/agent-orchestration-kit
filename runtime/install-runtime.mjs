@@ -3,16 +3,28 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { readModelSelection } from "./scripts/delegate.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const runtime = path.join(root, "runtime");
 const runtimeDirs = ["scripts", "config", "templates", "prompts"];
 export const dataDirs = ["runs", "telemetry", "overrides"];
 
+function modelOverrideSource(destination) {
+  return [path.join(runtime, "config", "models.local.json"),
+    path.join(root, "claude", "global", "config", "models.local.json"),
+    path.join(destination, "config", "models.local.json")].find((file) => fs.existsSync(file));
+}
+
+// Read exactly the model configuration installRuntime would deploy, without writing any files.
+export function deploymentModelSelection(destination) {
+  const override = modelOverrideSource(destination);
+  return readModelSelection([path.join(runtime, "config", "models.json"), ...(override ? [override] : [])]);
+}
+
 export function installRuntime(destination) {
   const targetOverride = path.join(destination, "config", "models.local.json");
-  const overrideSource = [path.join(runtime, "config", "models.local.json"),
-    path.join(root, "claude", "global", "config", "models.local.json"), targetOverride].find((file) => fs.existsSync(file));
+  const overrideSource = modelOverrideSource(destination);
   const modelOverride = overrideSource ? fs.readFileSync(overrideSource) : null;
 
   for (const dir of [...runtimeDirs, "shared", "claude", "codex"]) {

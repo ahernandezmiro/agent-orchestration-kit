@@ -25,7 +25,7 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolveCodexBin } from "../../runtime/scripts/exec-backend.mjs";
-import { dataDirs, deploymentRecord, installRuntime } from "../../runtime/install-runtime.mjs";
+import { dataDirs, deploymentModelSelection, deploymentRecord, installRuntime } from "../../runtime/install-runtime.mjs";
 import { removeBlock, ManagedBlockError } from "./scripts/managed-block.mjs";
 import { buildRulesFile, RULES_FILE_NAME } from "./scripts/rules-file.mjs";
 
@@ -135,16 +135,20 @@ function preflight() {
 }
 
 /**
- * List the distinct model ids the kit's config selects, using the kit's own wrapper so the
- * models.json + models.local.json merge rules live in one place.
+ * List the distinct model ids that installation will deploy, using the shared override
+ * resolution and model parser so preflight checks the same effective configuration.
  * Input: the preflight `check` reporter (used to flag an invalid config).
  * Output: array of model id strings (empty when the config is invalid).
  */
 function configuredModels(check) {
-  const r = spawnSync(process.execPath, [WRAPPER, "models", "--json"], { encoding: "utf8" });
-  check("model config (config/models.json + models.local.json)", r.status === 0, (r.status === 0 ? "" : r.stderr || r.stdout).trim());
-  if (r.status !== 0) return [];
-  return [...new Set(Object.values(JSON.parse(r.stdout).roles).map((role) => role.model))];
+  try {
+    const { selection } = deploymentModelSelection(DEST);
+    check("model config (config/models.json + models.local.json)", true);
+    return [...new Set(Object.values(selection).map((role) => role.model))];
+  } catch (error) {
+    check("model config (config/models.json + models.local.json)", false, error.message);
+    return [];
+  }
 }
 
 function deployRuntime() {

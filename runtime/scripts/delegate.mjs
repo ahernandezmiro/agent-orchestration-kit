@@ -124,21 +124,21 @@ function resolveClaudeBin() {
 /**
  * Resolve the model and default effort for every role from config/models.json, with
  * config/models.local.json overriding individual fields when present.
- * Input: none (reads MODEL_CONFIG_FILES).
+ * Input: ordered config paths (defaults to this runtime's MODEL_CONFIG_FILES).
  * Output: { selection: { <role>: { model, effort } }, sources: [files read] }.
- * Fails (exit 2) on a missing base file, invalid JSON, unknown role, or a role left
+ * Throws on a missing base file, invalid JSON, unknown role, or a role left
  * without a model or with an invalid effort — never falls back to a stale default.
  */
-function loadModelSelection() {
-  const [baseFile] = MODEL_CONFIG_FILES;
-  if (!fs.existsSync(baseFile)) fail(`model config not found: ${baseFile} (re-run the deploy script)`);
+export function readModelSelection(files = MODEL_CONFIG_FILES) {
+  const [baseFile] = files;
+  if (!fs.existsSync(baseFile)) throw new Error(`model config not found: ${baseFile} (re-run the deploy script)`);
   const selection = Object.fromEntries(Object.keys(ROLES).map((name) => [name, {}]));
   const sources = [];
-  for (const file of MODEL_CONFIG_FILES.filter((f) => fs.existsSync(f))) {
+  for (const file of files.filter((f) => fs.existsSync(f))) {
     let config;
-    try { config = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { fail(`invalid JSON in ${file}: ${e.message}`); }
+    try { config = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { throw new Error(`invalid JSON in ${file}: ${e.message}`); }
     for (const [roleName, values] of Object.entries(config.roles ?? {})) {
-      if (!ROLES[roleName]) fail(`${file}: unknown role '${roleName}' (roles: ${Object.keys(ROLES).join(", ")})`);
+      if (!ROLES[roleName]) throw new Error(`${file}: unknown role '${roleName}' (roles: ${Object.keys(ROLES).join(", ")})`);
       for (const key of ["model", "effort"]) {
         if (values?.[key] != null) selection[roleName][key] = values[key];
       }
@@ -146,10 +146,15 @@ function loadModelSelection() {
     sources.push(file);
   }
   for (const [roleName, { model, effort }] of Object.entries(selection)) {
-    if (!model || typeof model !== "string") fail(`no model configured for role '${roleName}' in ${sources.join(" + ")}`);
-    if (!VALID_EFFORTS.includes(effort)) fail(`role '${roleName}' effort must be one of: ${VALID_EFFORTS.join(", ")} (got ${JSON.stringify(effort)})`);
+    if (!model || typeof model !== "string") throw new Error(`no model configured for role '${roleName}' in ${sources.join(" + ")}`);
+    if (!VALID_EFFORTS.includes(effort)) throw new Error(`role '${roleName}' effort must be one of: ${VALID_EFFORTS.join(", ")} (got ${JSON.stringify(effort)})`);
   }
   return { selection, sources };
+}
+
+function loadModelSelection() {
+  try { return readModelSelection(); }
+  catch (error) { fail(error.message); }
 }
 
 /**
