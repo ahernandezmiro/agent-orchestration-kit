@@ -1,13 +1,15 @@
 #!/usr/bin/env node
-// Offline estimate of orchestrator (Claude) token use spent reviewing/reworking each delegated run.
+// Offline estimate of the lead's (orchestrator's) token use spent reviewing/reworking each delegated
+// run, and of which models acted as lead.
 // Author: maintained with Claude Code for the frontier-model orchestration setup.
 //
-//   node opus-usage.mjs [--runs-dir <dir>] [--projects-dir <dir>] [--json]
+//   node lead-usage.mjs [--runs-dir <dir>] [--projects-dir <dir>] [--json]
 //
 // For every assessed run it sums the usage of Claude assistant messages in the Claude Code
 // session transcripts (<home>/.claude/projects/**/*.jsonl) whose cwd is inside the run's repo
 // and whose timestamp falls between the worker result (finished_at / collected_at) and the
-// assessment. That window is Opus's review + correction effort for the run.
+// assessment. That window is the lead's review + correction effort for the run. The lead is
+// whichever model the user selected, so each row also lists the models seen in its window.
 //
 // Limits, by construction: work done before dispatch (packet writing) is not counted; runs in
 // the same repo with overlapping windows share tokens (flagged `overlap`); transcripts only
@@ -98,7 +100,11 @@ export async function loadUsage(projectsDir) {
   return out;
 }
 
-/** Attribute usage records to run windows. Input: windows, usage. Output: per-run rows. */
+/**
+ * Attribute usage records to run windows.
+ * Input: windows, usage. Output: per-run rows; lead_models is the sorted list of distinct models
+ * seen in the run's window.
+ */
 export function attribute(windows, usage) {
   return windows.map((w) => {
     const hits = usage.filter((u) => u.ts >= w.from && u.ts <= w.to && u.cwd && inside(u.cwd, w.root));
@@ -108,7 +114,8 @@ export function attribute(windows, usage) {
       run_id: w.run_id, role: w.role, outcome: w.outcome,
       window_min: Math.round((w.to - w.from) / 60000),
       messages: hits.length, input: sum("input"), cache_creation: sum("cache_creation"),
-      cache_read: sum("cache_read"), output: sum("output"), overlap
+      cache_read: sum("cache_read"), output: sum("output"), overlap,
+      lead_models: [...new Set(hits.map((u) => u.model))].sort()
     };
   });
 }
@@ -120,9 +127,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const rows = attribute(loadRunWindows(runsDir), await loadUsage(projectsDir));
   if (options.json) console.log(JSON.stringify(rows, null, 2));
   else {
-    const cols = ["role", "outcome", "window_min", "messages", "input", "cache_creation", "cache_read", "output", "overlap"];
+    const cols = ["role", "outcome", "window_min", "messages", "input", "cache_creation", "cache_read", "output", "overlap", "lead_models"];
     console.log(["run_id", ...cols].join("\t"));
-    for (const r of rows) console.log([r.run_id, ...cols.map((c) => r[c])].join("\t"));
+    for (const r of rows) console.log([r.run_id, ...cols.map((c) => Array.isArray(r[c]) ? r[c].join(",") : r[c])].join("\t"));
     const matched = rows.filter((r) => r.messages > 0).length;
     console.log(`\n${rows.length} assessed run(s); ${matched} matched transcript messages in ${projectsDir}`);
   }
