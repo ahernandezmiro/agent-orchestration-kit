@@ -8,6 +8,11 @@ export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 export const CLAUDE_AUTH_MODES = ["subscription", "api"];
 const READ_TOOLS = "Read,Glob,Grep";
 const WRITE_TOOLS = "Read,Glob,Grep,Edit,Write";
+// Never editable, whatever editable_paths says: git state and Claude Code configuration. Write
+// runs also get matching deny rules, which take precedence over allow rules, so a glob entry
+// such as `.*/**` cannot reach them either.
+const PROTECTED_DIRS = [".git", ".claude"];
+const PROTECTED_DENY = PROTECTED_DIRS.map((dir) => `Edit(**/${dir}/**)`);
 
 export function supportsClaudeVersion(version) {
   const match = /^(\d+)\.(\d+)\.(\d+)\b/.exec(version ?? "");
@@ -45,8 +50,9 @@ export function claudeWorkerEnv(auth) {
  * Turn packet editable_paths into Claude Code permission rules, relative to the run's cwd.
  * Input: entries, cwd. Output: { rules } or { error }.
  * A directory (trailing slash, or an existing directory) becomes Edit(./dir/**); a file or glob
- * becomes Edit(./entry). Absolute paths, `..`, and characters the CLI would split or misparse
- * (whitespace, commas, parentheses) are rejected.
+ * becomes Edit(./entry). Absolute paths, `..`, characters the CLI would split or misparse
+ * (whitespace, commas, parentheses), entries made only of wildcards (such as `*` or `**`) and
+ * entries that name .git or .claude are rejected.
  */
 export function editRulesFor(entries, cwd) {
   if (!entries.length) return { error: "editable_paths is empty; a Claude write run needs at least one path" };
@@ -59,6 +65,9 @@ export function editRulesFor(entries, cwd) {
     if (entry.split("/").includes("..")) return { error: `editable_paths entry '${raw}' must not contain '..'` };
     const relative = entry.replace(/^(\.\/)+/, "");
     if (!relative || relative === ".") return { error: `editable_paths entry '${raw}' names the whole working directory; list paths instead` };
+    const segments = relative.split("/").filter(Boolean);
+    if (segments.every((segment) => /^[*?]+$/.test(segment))) return { error: `editable_paths entry '${raw}' matches the whole working directory; list paths instead` };
+    if (segments.some((segment) => PROTECTED_DIRS.includes(segment.toLowerCase()))) return { error: `editable_paths entry '${raw}' reaches ${PROTECTED_DIRS.join(" or ")}, which workers may not edit` };
     const glob = /[*?[\]{}]/.test(relative);
     let directory = relative.endsWith("/");
     if (!glob && !directory) {
@@ -83,7 +92,7 @@ export function buildClaudeArgs({ model, effort, auth = "subscription", write = 
     "--settings", JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false }),
     "--tools", write ? WRITE_TOOLS : READ_TOOLS,
     "--allowedTools", [READ_TOOLS, ...(write ? editRules : [])].join(","),
-    "--disallowedTools", "mcp__*,Agent");
+    "--disallowedTools", ["mcp__*", "Agent", ...(write ? PROTECTED_DENY : [])].join(","));
   if (maxBudgetUsd != null) args.push("--max-budget-usd", String(maxBudgetUsd));
   args.push("--model", model, "--effort", effort);
   return args;

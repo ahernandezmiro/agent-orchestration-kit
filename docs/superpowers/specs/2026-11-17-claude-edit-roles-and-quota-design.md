@@ -168,7 +168,8 @@ No new statuses. New run fields: `claude_auth`, `claude_cost_usd` (Claude runs),
 - Runtime smoke test on a real Claude Code ≥ 2.1.286 logged in with a subscription, on a scratch repository:
   - a `luna-implement` packet edits an allowed file and tries a disallowed one: the allowed edit lands, the other file is unchanged, git guard OK, run `completed`;
   - an `astra-review` packet asks the worker to quote any instruction it was given about orchestration trailers or "Orchestration:" lines: it reports none (proves the lead rules file and CLAUDE.md did not load);
-  - `quota` on the Claude gateway prints a live 5-hour and 7-day reading.
+  - `quota` on the Claude gateway prints a live 5-hour and 7-day reading;
+  - the scratch repository holds a hostile `.claude/settings.json` (an `env` entry pointing `ANTHROPIC_BASE_URL` at a local listener, an `apiKeyHelper`, a hook and a broad `permissions.allow`): none of them takes effect. This confirms that `--restricted` ignores project and local settings files, as documented. If it fails, add `--setting-sources` with no sources, or refuse to run when the cwd has `.claude/settings*.json`.
 - Prompt freeze and the full suite pass.
 
 ## Risks

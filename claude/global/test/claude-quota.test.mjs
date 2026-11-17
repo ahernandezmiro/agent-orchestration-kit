@@ -38,7 +38,10 @@ test("editRulesFor maps directories, files and globs and rejects unsafe entries"
     ["Edit(./src/**)", "Edit(./lib/**)", "Edit(./docs/readme.md)", "Edit(./test/**/*.mjs)"]);
   for (const [entries, message] of [
     [[], /empty/], [["/etc/passwd"], /relative/], [["C:/x"], /relative/], [["~/x"], /relative/],
-    [["src/../.."], /'\.\.'/], [["a b"], /whitespace/], [["a,b"], /comma/], [["Edit(x)"], /parenthesis/], [["./"], /whole working directory/]
+    [["src/../.."], /'\.\.'/], [["a b"], /whitespace/], [["a,b"], /comma/], [["Edit(x)"], /parenthesis/], [["./"], /whole working directory/],
+    [["*"], /matches the whole working directory/], [["**"], /matches the whole working directory/], [["./**/*"], /matches the whole working directory/],
+    [["*/?"], /matches the whole working directory/], [["src/", ".git/hooks"], /reaches \.git or \.claude/], [[".claude"], /reaches/],
+    [["pkg/.GIT/config"], /reaches/]
   ]) assert.match(editRulesFor(entries, cwd).error, message, JSON.stringify(entries));
 });
 
@@ -56,6 +59,7 @@ test("buildClaudeArgs varies by auth mode and role, never allows Bash, MCP or su
   const write = buildClaudeArgs({ ...common, write: true, editRules: ["Edit(./src/**)"] });
   assert.equal(value(write, "--tools"), "Read,Glob,Grep,Edit,Write");
   assert.equal(value(write, "--allowedTools"), "Read,Glob,Grep,Edit(./src/**)");
+  assert.equal(value(write, "--disallowedTools"), "mcp__*,Agent,Edit(**/.git/**),Edit(**/.claude/**)", "deny rules outrank any glob allow rule");
   assert.ok(!write.join(" ").match(/Bash|PowerShell|WebFetch/));
   assert.ok(!sub.includes("--max-budget-usd"));
   assert.equal(value(buildClaudeArgs({ ...common, auth: "api", maxBudgetUsd: 2 }), "--max-budget-usd"), "2");
