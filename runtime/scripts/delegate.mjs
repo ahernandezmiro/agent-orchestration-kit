@@ -60,7 +60,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolveCodexBin, resolveWorkerBin, buildExecArgs, submitJob, readJob, waitJob, cancelJob, reconcileLost, normalizeExecResult } from "./exec-backend.mjs";
 import {
-  CLAUDE_AUTH_MODES, CLAUDE_EFFORTS, CLAUDE_MIN_VERSION, buildClaudeArgs, claudeEnvironmentNote, claudeWorkerEnv, editRulesFor, supportsClaudeVersion
+  CLAUDE_AUTH_MODES, CLAUDE_EFFORTS, CLAUDE_MIN_VERSION, buildClaudeArgs, claudeEnvironmentNote, claudeWorkerEnv, editRulesFor, protectedTouched, supportsClaudeVersion
 } from "./claude-backend.mjs";
 import {
   claudeOngoing, evaluateApiGate, evaluateSubscriptionGate, formatClaudeGateLine, loadClaudeQuotaRules, readRejectionOverride, readSubscriptionSnapshot
@@ -1178,6 +1178,12 @@ function recordWorkerResult(run, output, reportedFiles = null) {
   if (Array.isArray(run.editable_paths)) {
     run.out_of_scope_files = outOfScopeFiles(run.touched_files, run.editable_paths, run.cwd);
     if (run.out_of_scope_files.length) console.log(`SCOPE: ${run.out_of_scope_files.length} file(s) outside editable_paths: ${run.out_of_scope_files.join(", ")}`);
+  }
+  if (run.git_root && run.baseline_tree) {
+    // Snapshots cover the working tree, not .git internals (the git guard covers refs); this
+    // catches .claude and nested .git content, whatever the letter case.
+    run.protected_files_touched = protectedTouched((run.touched_files || []).map((f) => path.relative(run.git_root, f).split(path.sep).join("/")));
+    if (run.protected_files_touched.length) console.log(`PROTECTED: worker changed ${run.protected_files_touched.join(", ")}`);
   }
   run.worker_report = parseWorkerReport(output);
   if (run.status === "failed" && looksLikeQuotaStop(output)) run.failure_hint = "quota";

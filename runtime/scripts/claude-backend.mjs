@@ -8,11 +8,49 @@ export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 export const CLAUDE_AUTH_MODES = ["subscription", "api"];
 const READ_TOOLS = "Read,Glob,Grep";
 const WRITE_TOOLS = "Read,Glob,Grep,Edit,Write";
-// Never editable, whatever editable_paths says: git state and Claude Code configuration. Write
-// runs also get matching deny rules, which take precedence over allow rules, so a glob entry
-// such as `.*/**` cannot reach them either.
-const PROTECTED_DIRS = [".git", ".claude"];
-const PROTECTED_DENY = PROTECTED_DIRS.map((dir) => `Edit(**/${dir}/**)`);
+// Never editable, whatever editable_paths says: git state (a .git directory, or the .git file
+// of a worktree) and Claude Code configuration. Claude Code already denies these under
+// dontAsk; the kit adds its own layers:
+//   1. editRulesFor rejects entries that name them or whose glob segments could match them;
+//   2. write runs get deny rules, which outrank allow rules, for every letter-case variant of
+//      each name (case-insensitive file systems resolve .GIT to .git), the name itself and
+//      everything below it;
+//   3. after the run, protectedTouched() reports any touched path under them, case-folded.
+export const PROTECTED_DIRS = [".git", ".claude"];
+function caseVariants(name) {
+  return [...name].reduce((acc, ch) => acc.flatMap((prefix) =>
+    ch.toLowerCase() === ch.toUpperCase() ? [prefix + ch] : [prefix + ch.toLowerCase(), prefix + ch.toUpperCase()]), [""]);
+}
+const PROTECTED_DENY = PROTECTED_DIRS.flatMap(caseVariants).flatMap((name) => [`Edit(**/${name})`, `Edit(**/${name}/**)`]);
+
+// True when one glob path segment (*, ?, [class], {a}) matches a protected name, ignoring case.
+function globCouldMatchProtected(segment) {
+  if (!/[*?[\]{}]/.test(segment)) return false;
+  let source = "";
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (ch === "*") source += ".*";
+    else if (ch === "?") source += ".";
+    else if (ch === "[") {
+      const end = segment.indexOf("]", i + 1);
+      if (end < 0) return true; // malformed class: refuse rather than guess
+      source += `[${segment.slice(i + 1, end).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
+      i = end;
+    } else if (ch === "{") {
+      const end = segment.indexOf("}", i + 1);
+      if (end < 0) return true;
+      source += `(?:${segment.slice(i + 1, end).replace(/[.+^$()|\\]/g, "\\$&")})`;
+      i = end;
+    } else source += ch.replace(/[.+^$()|\\]/g, "\\$&");
+  }
+  const regex = new RegExp(`^${source}$`, "i");
+  return PROTECTED_DIRS.some((name) => regex.test(name));
+}
+
+/** cwd-relative posix paths whose case-folded segments include a protected name. */
+export function protectedTouched(relativePaths) {
+  return relativePaths.filter((rel) => rel.split("/").some((segment) => PROTECTED_DIRS.includes(segment.toLowerCase())));
+}
 
 export function supportsClaudeVersion(version) {
   const match = /^(\d+)\.(\d+)\.(\d+)\b/.exec(version ?? "");
@@ -68,6 +106,11 @@ export function editRulesFor(entries, cwd) {
     const segments = relative.split("/").filter(Boolean);
     if (segments.every((segment) => /^[*?]+$/.test(segment))) return { error: `editable_paths entry '${raw}' matches the whole working directory; list paths instead` };
     if (segments.some((segment) => PROTECTED_DIRS.includes(segment.toLowerCase()))) return { error: `editable_paths entry '${raw}' reaches ${PROTECTED_DIRS.join(" or ")}, which workers may not edit` };
+    // A glob segment such as .g*, .[Gg]it, {.git} or ?git could match a protected name. Bare * and
+    // ** segments are needed for ordinary entries (src/**) and are covered by the deny rules.
+    if (segments.some((segment) => !/^\*{1,2}$/.test(segment) && globCouldMatchProtected(segment))) {
+      return { error: `editable_paths entry '${raw}' has a glob segment that could match ${PROTECTED_DIRS.join(" or ")}; name those paths literally` };
+    }
     const glob = /[*?[\]{}]/.test(relative);
     let directory = relative.endsWith("/");
     if (!glob && !directory) {
