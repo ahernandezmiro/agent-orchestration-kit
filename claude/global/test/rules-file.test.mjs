@@ -72,3 +72,9 @@ test("import line in a source throws with the file name", (t) => {
   const root = tempKit(t, { "claude/CLAUDE.md": "# Rules\n\n@~/somewhere/else.md\n" });
   assert.throws(() => buildRulesFile({ kitRoot: root, commit: "c1" }), /claude\/CLAUDE\.md/);
 });
+
+test("freeze manifest pins the generated rules file", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(HERE, "golden", "static-prompts.sha256.json"), "utf8"));
+  const expected = crypto.createHash("sha256").update(buildRulesFile({ kitRoot: REPO, commit: "<commit>" })).digest("hex");
+  assert.equal(manifest["generated/orchestration-kit.rules.md"], expected);
+});

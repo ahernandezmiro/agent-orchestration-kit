@@ -19,5 +19,6 @@
   "shared/CREATIVE_PIPELINE_RULES.md": "b9ed31c8e8888e9c0b7075e0a01c64d32c97472bda6a9d8cbf685c39c15996c8",
   "shared/REVIEW_CONTRACT.md": "14370f164619cf42937ea60a1f273f2aecd17bfce0fc4a6b08a1cb0ab95cf353",
   "shared/ROUTING_POLICY.md": "7a63b789cd9515346ec2002bc39e989f7e320abb71a113e8719b4d2638c99af3",
-  "shared/TASK_CONTRACT.md": "d07d8f581d2e2482d3f7799cdc9c7c7b78a4966bbb2cde3e55d9b52958bc13e2"
+  "shared/TASK_CONTRACT.md": "d07d8f581d2e2482d3f7799cdc9c7c7b78a4966bbb2cde3e55d9b52958bc13e2",
+  "generated/orchestration-kit.rules.md": "bad474e3bbc90c4eecd1b586ed4f0ad3b3381056b35f8dbe3d234af74df00a01"
 }

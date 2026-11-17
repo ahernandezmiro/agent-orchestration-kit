@@ -14,8 +14,9 @@
 //      `codex-delegate.mjs run --dry-run` for every role with a stub companion, and compare
 //      each generated prompt with golden/<role>.golden.md. This covers the wrapper's own
 //      prompt text (buildPrompt, worker display names) as well as the inlined docs.
-//   2. Orchestrator/agent prompts: sha256 of the files Claude loads (CLAUDE.md block source,
-//      imported policy docs, role docs, subagent definitions) against golden/static-prompts.sha256.json.
+//   2. Orchestrator/agent prompts: sha256 of the files Claude loads (the sources of the rules
+//      file, role docs, subagent definitions) and of the generated rules file itself, against
+//      golden/static-prompts.sha256.json.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -23,12 +24,16 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { buildRulesFile } from "../scripts/rules-file.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..", "..");
 const GOLDEN_DIR = path.join(HERE, "golden");
 const STATIC_MANIFEST = path.join(GOLDEN_DIR, "static-prompts.sha256.json");
 const UPDATE = process.argv.includes("--update");
+// Manifest key for the generated rules file. It is hashed with a fixed commit placeholder so the
+// hash only changes when the instruction text does.
+const GENERATED_RULES_KEY = "generated/orchestration-kit.rules.md";
 
 // One dry run per role; packets come from this test folder.
 const WORKER_CASES = [
@@ -166,6 +171,7 @@ function main() {
   }
 
   const hashes = Object.fromEntries(staticPromptFiles().map((rel) => [rel, sha256(path.join(REPO, rel))]));
+  hashes[GENERATED_RULES_KEY] = crypto.createHash("sha256").update(buildRulesFile({ kitRoot: REPO, commit: "<commit>" })).digest("hex");
   if (UPDATE) {
     fs.writeFileSync(STATIC_MANIFEST, JSON.stringify(hashes, null, 2) + "\n");
   } else {
