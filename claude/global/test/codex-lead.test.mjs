@@ -49,6 +49,19 @@ function success(result) {
   return result.stdout;
 }
 
+test("Codex installer --check reports the shared preflight and a foreign skill, changing nothing", (t) => {
+  const f = fixture(t);
+  const clean = f.install("--check");
+  assert.match(clean.stdout, /Preflight:[\s\S]*\[(ok|!!)\] codex CLI[\s\S]*\[ok\] model config[\s\S]*\[ok\] Codex lead skill location/);
+  assert.equal(fs.existsSync(f.runtime), false, "preflight installs nothing");
+  fs.mkdirSync(f.skill, { recursive: true });
+  fs.writeFileSync(path.join(f.skill, "SKILL.md"), "someone else's skill\n");
+  const foreign = f.install("--check");
+  assert.equal(foreign.status, 1);
+  assert.match(foreign.stdout, /\[!!\] Codex lead skill location — .* holds a skill the kit did not install/);
+  assert.equal(f.install("--check", "--dry-run").status, 2, "--check cannot be combined with --dry-run");
+});
+
 test("Codex installer stages explicit lead skill and usable gateway, preserving user instructions and run data", (t) => {
   const f = fixture(t);
   fs.mkdirSync(f.codexHome);

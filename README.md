@@ -9,14 +9,34 @@ Start in Claude Code or Codex. The model selected in that session is the **lead*
 
 ## Install
 
-Run the installer for the client whose runtime directory you want to use. Both require Node.js 18 or later.
+Install and update with the deploy script at the repository root. It needs Node.js 18 or later. It finds every supported lead client installed for your user, runs the prompt-freeze guard once, runs each client's installer, and prints the effective models. Installing and updating are the same command.
 
-| Client | Install or update | Runtime directory | Native lead registration |
+```powershell
+.\deploy.ps1 -Check
+```
+```powershell
+.\deploy.ps1
+```
+
+On Linux, WSL or macOS use `./deploy.sh --check`, then `./deploy.sh`.
+
+| Client | Detected when | Runtime directory | Lead registration |
 |---|---|---|---|
-| Claude Code | `node claude/install.mjs` | `~/.claude/orchestration/` | Rules and agents under `~/.claude/` |
-| Codex | `node codex/install.mjs` | `$CODEX_HOME/orchestration/` (default `~/.codex/orchestration/`) | `~/.agents/skills/orchestration-kit/` |
+| `claude-code` | `~/.claude` exists or `claude` is on PATH | `~/.claude/orchestration/` | Rules and agents under `~/.claude/` |
+| `codex` | `$CODEX_HOME` or `~/.codex` exists, or `codex` is on PATH | `$CODEX_HOME/orchestration/` (default `~/.codex/orchestration/`) | `~/.agents/skills/orchestration-kit/` |
 
-Add `--runtime-only` to either command to install both gateways without registering lead instructions. Add `--dry-run` to preview the install. Each runtime keeps its own runs, overrides, and Codex quota reservations. For client-specific requirements, upgrades, and uninstall commands, see the [Claude Code guide](claude/GLOBAL_INSTALL.md) and [Codex guide](codex/LEAD_INSTALL.md).
+| `deploy.ps1` | `deploy.sh` | Effect |
+|---|---|---|
+| `-Client codex` | `--client codex` | Deploy only the named clients (`claude-code`, `codex`; several allowed), whether or not they are detected |
+| `-Check` | `--check` | Preflight only: worker CLIs, logins, model ids, lead registration. Changes nothing |
+| `-DryRun` | `--dry-run` | Show what would change |
+| `-Uninstall` | `--uninstall` | Remove each client's lead registration. Claude Code also removes its runtime; Codex keeps its gateway so jobs can still be collected. Run data is kept |
+| `-Uninstall -Purge` | `--uninstall --purge` | Also delete Claude Code's `runs/`, `telemetry/` and `overrides/` |
+| `-AllowPromptChange` | `--allow-prompt-change` | Skip the prompt-freeze guard (only after the evaluation is closed) |
+
+Afterwards start a new session in each client: Claude Code loads the rules and agents at session start, and in Codex you invoke `$orchestration-kit`.
+
+The deploy script calls `claude/install.mjs` and `codex/install.mjs`. You can run either installer directly with `--check`, `--dry-run`, `--runtime-only` (install both gateways without registering a lead) or `--uninstall`, but then the prompt-freeze guard does not run. Each runtime keeps its own runs and overrides. For client-specific details see the [Claude Code guide](claude/GLOBAL_INSTALL.md) and the [Codex guide](codex/LEAD_INSTALL.md).
 
 ## Shared layout
 

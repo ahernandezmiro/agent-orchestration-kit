@@ -44,7 +44,7 @@ The table shows the original values. Since the kit moved to the `orchestration-k
 
 ## 2. Quick path
 
-Use the deploy script at the repo root. It checks Node, runs the prompt-freeze guard, then calls `install.mjs`. Fresh installs and updates are the same command.
+Use the deploy script at the repo root. It checks Node, finds the lead clients installed for your user (Claude Code and Codex), runs the prompt-freeze guard, then calls each client's installer (`claude/install.mjs` for Claude Code). Fresh installs and updates are the same command. To deploy only Claude Code, add `-Client claude-code` (`--client claude-code`). The [README](../README.md#install) lists every option.
 
 ```powershell
 .\deploy.ps1 -Check
@@ -64,9 +64,9 @@ node --input-type=module -e "import fs from 'node:fs'; import os from 'node:os';
 
 To go back to a kit version from before 2026-11-17, run `--uninstall` from this version first, or delete `~/.claude/rules/orchestration-kit.md` by hand. Older installers put their block back in `~/.claude/CLAUDE.md` but don't know about the rules file, so without this the lead would load both instruction sets.
 
-Other modes (`deploy.ps1` switch / `deploy.sh` flag):
+Other modes (`deploy.ps1` switch / `deploy.sh` flag), applied to every client deployed:
 - `-DryRun` / `--dry-run` shows what would change.
-- `-Uninstall` / `--uninstall` removes everything the installer added (with backups), but keeps `~/.claude/orchestration/runs/` and `telemetry/`.
+- `-Uninstall` / `--uninstall` removes everything the Claude Code installer added (with backups), but keeps `~/.claude/orchestration/runs/`, `telemetry/` and `overrides/`.
 - `-Uninstall -Purge` / `--uninstall --purge` also deletes that data.
 - `-AllowPromptChange` / `--allow-prompt-change` skips the prompt-freeze guard (only after the evaluation is closed).
 

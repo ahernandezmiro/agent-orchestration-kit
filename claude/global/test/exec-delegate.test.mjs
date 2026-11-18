@@ -224,8 +224,8 @@ test("install preflight permits a missing companion when Codex CLI is available"
   const f = fixture(t);
   const codex = path.join(f.dir, "preflight-codex.mjs");
   fs.writeFileSync(codex, `if (process.argv.includes("--version")) { console.log("codex 1"); process.exit(0); } if (process.argv[2] === "login" && process.argv[3] === "status") { console.log("Logged in"); process.exit(0); } if (process.argv[2] === "mcp-server") { console.log("Usage: codex mcp-server"); process.exit(0); } process.exit(0);`);
-  const cache = path.join(f.emptyHome, ".codex"); fs.mkdirSync(cache);
-  fs.writeFileSync(path.join(cache, "models_cache.json"), JSON.stringify({ models: ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"].map(slug => ({ slug })) }));
+  // The fixture sets CODEX_HOME to emptyHome; Codex keeps models_cache.json directly in CODEX_HOME.
+  fs.writeFileSync(path.join(f.env.CODEX_HOME, "models_cache.json"), JSON.stringify({ models: ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"].map(slug => ({ slug })) }));
   const result = spawnSync(process.execPath, [path.join(REPO, "claude", "global", "install.mjs"), "--check"], {
     encoding: "utf8", env: { ...f.env, CODEX_BIN: codex }
   });
