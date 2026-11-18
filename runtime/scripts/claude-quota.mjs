@@ -49,7 +49,9 @@ export function loadClaudeQuotaRules(file, roleNames) {
     subscription: {
       windowMinutes: SUBSCRIPTION_WINDOW_MINUTES,
       readTimeoutMs: sub.read_timeout_ms ?? 10000,
-      sevenDayMinRemaining: sub.seven_day_min_remaining ?? 10,
+      // null turns the weekly check off explicitly (for plans without a weekly limit); a missing
+      // key keeps the default, and then a missing weekly reading blocks.
+      sevenDayMinRemaining: Object.hasOwn(sub, "seven_day_min_remaining") ? sub.seven_day_min_remaining : 10,
       roles: roles("subscription", "a percent between 0 and 100", 100)
     },
     api: {
@@ -59,7 +61,9 @@ export function loadClaudeQuotaRules(file, roleNames) {
     }
   };
   if (!Number.isInteger(rules.subscription.readTimeoutMs) || rules.subscription.readTimeoutMs < 1000) throw new Error(`${file}: claude.subscription.read_timeout_ms must be an integer >= 1000`);
-  if (!isNumber(rules.subscription.sevenDayMinRemaining, 0, 100)) throw new Error(`${file}: claude.subscription.seven_day_min_remaining must be a percent between 0 and 100`);
+  if (rules.subscription.sevenDayMinRemaining !== null && !isNumber(rules.subscription.sevenDayMinRemaining, 0, 100)) {
+    throw new Error(`${file}: claude.subscription.seven_day_min_remaining must be a percent between 0 and 100, or null to turn the weekly check off`);
+  }
   if (!Number.isInteger(rules.api.windowMinutes) || rules.api.windowMinutes < 1) throw new Error(`${file}: claude.api.window_minutes must be a positive integer`);
   if (!isNumber(rules.api.budgetUsd, 0)) throw new Error(`${file}: claude.api.budget_usd must be a dollar amount >= 0`);
   return rules;
@@ -72,22 +76,33 @@ function epochSeconds(value) {
   return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
 }
 
+// A window reading, or INVALID when present but unusable (non-numeric or outside 0-100 %).
+const INVALID = Symbol("invalid");
 function readWindow(window) {
-  if (!window) return null;
-  const used = Number(window.utilization ?? window.used_percentage ?? window.usedPercent ?? window.percent);
-  if (!Number.isFinite(used)) return null;
-  return { usedPercent: used, resetsAt: epochSeconds(window.resets_at ?? window.resetsAt) };
+  if (window == null) return null;
+  const raw = window.utilization ?? window.used_percentage ?? window.usedPercent ?? window.percent;
+  const used = typeof raw === "string" && raw.trim() ? Number(raw) : raw;
+  if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100) return INVALID;
+  const resetsRaw = window.resets_at ?? window.resetsAt;
+  const resetsAt = epochSeconds(resetsRaw);
+  if (resetsRaw != null && resetsAt == null) return INVALID;
+  return { usedPercent: used, resetsAt };
 }
 
 /**
- * Normalize an /api/oauth/usage response. Input: parsed JSON. Output: { fiveHour, sevenDay } or null.
+ * Normalize an /api/oauth/usage response or a snapshot override.
+ * Input: parsed JSON. Output: { fiveHour, sevenDay|null } or { error }.
+ * A window that is present but unusable makes the whole reading unusable (fail closed); an
+ * absent weekly window is reported as null and judged by the gate's configuration.
  */
 export function parseUsageResponse(body) {
   const limits = Array.isArray(body?.limits) ? body.limits : [];
   const byKind = (kind) => limits.find((l) => l?.kind === kind);
-  const fiveHour = readWindow(body?.five_hour) ?? readWindow(byKind("session"));
-  const sevenDay = readWindow(body?.seven_day) ?? readWindow(byKind("weekly_all"));
-  return fiveHour ? { fiveHour, sevenDay } : null;
+  const fiveHour = readWindow(body?.five_hour ?? body?.fiveHour ?? byKind("session"));
+  const sevenDay = readWindow(body?.seven_day ?? body?.sevenDay ?? byKind("weekly_all"));
+  if (fiveHour === INVALID || sevenDay === INVALID) return { error: "usage reading has an invalid window (utilization outside 0-100 or bad reset time)" };
+  if (!fiveHour) return { error: "usage reading has no 5-hour window" };
+  return { fiveHour, sevenDay };
 }
 
 function credentialsFile(env) {
@@ -103,26 +118,41 @@ function usageUrl(env) {
   return url.href;
 }
 
-async function readLiveUsage({ timeoutMs, env, nowMs }) {
+/**
+ * The login token the worker itself will use, in Claude Code's order: CLAUDE_CODE_OAUTH_TOKEN
+ * overrides stored credentials, so the gate reads the same account the worker draws on.
+ * Output: { token, source } or throws an Error whose message never contains credential text.
+ */
+function loginToken(env, nowMs) {
+  if (env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) return { token: env.CLAUDE_CODE_OAUTH_TOKEN.trim(), source: "env" };
   const file = credentialsFile(env);
-  let token;
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); }
+  catch (e) { throw new Error(e.code === "ENOENT" ? `no credentials file at ${file} (keychain storage or not logged in)` : `credentials file at ${file} is not readable`); }
+  let oauth;
+  // JSON.parse messages quote the input; never surface them for this file.
+  try { oauth = JSON.parse(text)?.claudeAiOauth ?? {}; } catch { throw new Error(`credentials file at ${file} is not valid JSON`); }
+  text = null;
+  if (typeof oauth.accessToken !== "string" || !oauth.accessToken) throw new Error("no subscription login in the credentials file");
+  if (oauth.expiresAt != null && !(Number(oauth.expiresAt) > nowMs)) throw new Error("login token expired; run any claude command to refresh it");
+  return { token: oauth.accessToken, source: "file" };
+}
+
+async function readLiveUsage({ timeoutMs, env, nowMs }) {
+  let { token, source } = loginToken(env, nowMs);
+  let response;
   try {
-    const oauth = JSON.parse(fs.readFileSync(file, "utf8")).claudeAiOauth ?? {};
-    if (typeof oauth.accessToken !== "string" || !oauth.accessToken) throw new Error("no subscription login in the credentials file");
-    if (oauth.expiresAt != null && Number(oauth.expiresAt) <= nowMs) throw new Error("login token expired; run any claude command to refresh it");
-    token = oauth.accessToken;
-  } catch (e) {
-    throw new Error(e.code === "ENOENT" ? `no credentials file at ${file} (keychain storage or not logged in)` : e.message);
-  }
-  const response = await fetch(usageUrl(env), {
-    headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-  token = null;
+    response = await fetch(usageUrl(env), {
+      headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } finally { token = null; }
   if (!response.ok) throw new Error(`usage endpoint answered ${response.status}`);
-  const parsed = parseUsageResponse(await response.json());
-  if (!parsed) throw new Error("usage response has no 5-hour window");
-  return { ...parsed, source: "live" };
+  let body;
+  try { body = await response.json(); } catch { throw new Error("usage endpoint answered with invalid JSON"); }
+  const parsed = parseUsageResponse(body);
+  if (parsed.error) throw new Error(parsed.error);
+  return { ...parsed, source: `live (${source === "env" ? "CLAUDE_CODE_OAUTH_TOKEN" : "credentials file"})` };
 }
 
 /**
@@ -133,13 +163,11 @@ export async function readSubscriptionSnapshot({ readTimeoutMs, env = process.en
   const errors = [];
   if (env.CLAUDE_QUOTA_SNAPSHOT) {
     try {
-      const s = JSON.parse(fs.readFileSync(env.CLAUDE_QUOTA_SNAPSHOT, "utf8"));
-      const fiveHour = s.fiveHour && Number.isFinite(Number(s.fiveHour.usedPercent))
-        ? { usedPercent: Number(s.fiveHour.usedPercent), resetsAt: s.fiveHour.resetsAt ?? null } : null;
-      const sevenDay = s.sevenDay && Number.isFinite(Number(s.sevenDay.usedPercent))
-        ? { usedPercent: Number(s.sevenDay.usedPercent), resetsAt: s.sevenDay.resetsAt ?? null } : null;
-      if (!fiveHour) throw new Error("no fiveHour.usedPercent");
-      return { snapshot: { fiveHour, sevenDay, source: `file:${env.CLAUDE_QUOTA_SNAPSHOT}` }, errors };
+      let s;
+      try { s = JSON.parse(fs.readFileSync(env.CLAUDE_QUOTA_SNAPSHOT, "utf8")); } catch { throw new Error("not a readable JSON file"); }
+      const parsed = parseUsageResponse(s);
+      if (parsed.error) throw new Error(parsed.error);
+      return { snapshot: { ...parsed, source: `file:${env.CLAUDE_QUOTA_SNAPSHOT}` }, errors };
     } catch (e) {
       errors.push(`CLAUDE_QUOTA_SNAPSHOT: ${e.message}`);
       return { snapshot: null, errors };
@@ -196,6 +224,18 @@ export function claudeAuthOf(run) {
 }
 
 /**
+ * What a run reserved when it was admitted, so another runtime's configuration or a later config
+ * change cannot shrink it: the per-run dollar cap for API-key runs, else the amount its gate
+ * recorded, else (records from before amounts were recorded) the current role setting.
+ */
+export function recordedReservation(run, rules) {
+  for (const value of [claudeAuthOf(run) === "api" ? run.claude_max_budget_usd : null, run.quota_gate?.required]) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  }
+  return rules.roles[run.role] ?? 0;
+}
+
+/**
  * Claude runs of one auth mode that still hold a reservation.
  * Input: run records, mode, rules for that mode, nowMs. Output: [{ run_id, role, status, started_at, reserved }].
  */
@@ -204,7 +244,7 @@ export function claudeOngoing(runs, auth, rules, nowMs = Date.now()) {
   return runs
     .filter((r) => r.backend === "claude" && claudeAuthOf(r) === auth && ONGOING_STATUSES.includes(r.status)
       && nowMs - Date.parse(r.started_at || 0) < windowMs)
-    .map((r) => ({ run_id: r.run_id, role: r.role, status: r.status, started_at: r.started_at, reserved: rules.roles[r.role] ?? 0 }));
+    .map((r) => ({ run_id: r.run_id, role: r.role, status: r.status, started_at: r.started_at, reserved: recordedReservation(r, rules) }));
 }
 
 /**
@@ -219,17 +259,25 @@ export function evaluateSubscriptionGate({ role, snapshot, override, ongoing, ru
   if (override) {
     return { ...base, allowed: false, reason: `subscription rejected a request; blocked until ${new Date(override.resetsAt * 1000).toISOString()}` };
   }
-  if (!snapshot?.fiveHour || !Number.isFinite(snapshot.fiveHour.usedPercent)) {
-    return { ...base, allowed: false, reason: "quota unknown (no source answered)" };
+  const valid = (w) => w && typeof w.usedPercent === "number" && Number.isFinite(w.usedPercent) && w.usedPercent >= 0 && w.usedPercent <= 100;
+  if (!valid(snapshot?.fiveHour)) {
+    return { ...base, allowed: false, reason: "quota unknown (no valid reading)" };
   }
-  // A window whose reset time has passed is fresh; its reading is stale and counts as 0% used.
-  const used = (w) => (w.resetsAt != null && w.resetsAt * 1000 <= nowMs ? 0 : w.usedPercent);
-  const remaining = Math.max(0, 100 - used(snapshot.fiveHour));
+  // A reading whose window has already reset no longer describes the current window: fail closed.
+  const stale = (w) => w.resetsAt != null && w.resetsAt * 1000 <= nowMs;
+  if (stale(snapshot.fiveHour) || (snapshot.sevenDay && stale(snapshot.sevenDay))) {
+    return { ...base, allowed: false, reason: "quota unknown (reading is from a window that has already reset)" };
+  }
+  const weeklyChecked = rules.sevenDayMinRemaining !== null;
+  if (weeklyChecked && !valid(snapshot.sevenDay)) {
+    return { ...base, allowed: false, reason: "quota unknown (no valid 7-day reading; set seven_day_min_remaining to null if the plan has no weekly limit)" };
+  }
+  const remaining = 100 - snapshot.fiveHour.usedPercent;
   const effective = remaining - reserved;
-  const sevenDayRemaining = snapshot.sevenDay ? Math.max(0, 100 - used(snapshot.sevenDay)) : null;
+  const sevenDayRemaining = snapshot.sevenDay ? 100 - snapshot.sevenDay.usedPercent : null;
   const result = { ...base, remaining, effective, seven_day_remaining: sevenDayRemaining };
   if (effective - required <= 0) return { ...result, allowed: false, reason: `5h effective ${effective}% <= ${required}% required` };
-  if (sevenDayRemaining != null && sevenDayRemaining <= rules.sevenDayMinRemaining) {
+  if (weeklyChecked && sevenDayRemaining <= rules.sevenDayMinRemaining) {
     return { ...result, allowed: false, reason: `7d remaining ${sevenDayRemaining}% <= ${rules.sevenDayMinRemaining}% floor` };
   }
   return { ...result, allowed: true, reason: `5h effective ${effective}% > ${required}% required${sevenDayRemaining == null ? "" : `, 7d remaining ${sevenDayRemaining}%`}` };
@@ -245,7 +293,9 @@ export function evaluateApiGate({ role, runs, rules, nowMs = Date.now() }) {
   const windowMs = rules.windowMinutes * 60 * 1000;
   const inWindow = runs.filter((r) => r.backend === "claude" && claudeAuthOf(r) === "api" && nowMs - Date.parse(r.started_at || 0) < windowMs);
   const spent = inWindow.filter((r) => FINAL_STATUSES.includes(r.status))
-    .reduce((sum, r) => sum + (Number.isFinite(r.claude_cost_usd) ? r.claude_cost_usd : (r.status === "abandoned" ? 0 : rules.roles[r.role] ?? 0)), 0);
+    // Unknown cost (including abandoned runs, whose worker may still be spending) counts the
+    // run's full reservation.
+    .reduce((sum, r) => sum + (Number.isFinite(r.claude_cost_usd) ? r.claude_cost_usd : recordedReservation(r, rules)), 0);
   const ongoing = claudeOngoing(runs, "api", rules, nowMs);
   const reserved = ongoing.reduce((sum, r) => sum + r.reserved, 0);
   const required = rules.roles[role];

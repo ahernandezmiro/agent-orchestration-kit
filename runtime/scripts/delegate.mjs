@@ -568,8 +568,33 @@ function protectedStateHash(root) {
   try {
     for (const rel of gitSurfaces) add(gitDir, rel, "git");
     addModules(path.join(gitDir, "modules"), "git/modules");
-    for (const name of subdirs(path.join(gitDir, "worktrees"))) {
-      for (const rel of ["config.worktree", "commondir", "gitdir"]) add(path.join(gitDir, "worktrees", name), rel, `git/worktrees/${name}`);
+    // Only this checkout's own worktree admin dir: sibling worktrees come and go while workers run
+    // (the kit's own --worktree runs create them), and their branches are outside the guard too.
+    const ownDir = git(root, ["rev-parse", "--git-dir"]);
+    const ownGitDir = ownDir ? path.resolve(root, ownDir) : gitDir;
+    if (path.resolve(ownGitDir).toLowerCase() !== path.resolve(gitDir).toLowerCase()) {
+      for (const rel of ["config.worktree", "commondir", "gitdir"]) add(ownGitDir, rel, "git/this-worktree");
+    }
+    // Files git executes or reads as config from elsewhere: core.hooksPath, a core.fsmonitor hook
+    // script, and include/includeIf targets. Read from the effective config, so a hooks folder
+    // that .gitignore hides is still covered.
+    const hooksPath = git(root, ["config", "--get", "core.hooksPath"]);
+    if (hooksPath) {
+      const target = path.resolve(root, hooksPath.replace(/^~(?=$|[\\/])/, os.homedir()));
+      add(path.dirname(target), path.basename(target), "hooksPath");
+    }
+    const fsmonitor = git(root, ["config", "--get", "core.fsmonitor"]);
+    if (fsmonitor && !/^(true|false|0|1)$/i.test(fsmonitor.trim())) {
+      const target = path.resolve(root, fsmonitor.trim());
+      if (fs.existsSync(target)) add(path.dirname(target), path.basename(target), "fsmonitor");
+    }
+    const origins = spawnSync("git", ["-C", root, "config", "--list", "--show-origin", "-z"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    if (origins.status === 0) {
+      const files = new Set();
+      const parts = origins.stdout.split("\0");
+      for (let i = 0; i + 1 < parts.length; i += 2) if (parts[i].startsWith("file:")) files.add(path.resolve(root, parts[i].slice(5)));
+      const ownConfig = path.resolve(gitDir, "config").toLowerCase();
+      for (const file of [...files].sort()) if (file.toLowerCase() !== ownConfig) add(path.dirname(file), path.basename(file), "config-origin");
     }
     add(root, ".claude", "repo");
     // .claude or .git folders that .gitignore hides from the tree snapshot, at any depth. Git lists
@@ -611,7 +636,12 @@ function verifyGit(baseline, { quiet = false, worktree = null } = {}) {
     if (relevantRefs(now?.refs) !== relevantRefs(baseline.refs)) changed.push("refs");
   } else changed = ["head", "branch", "refs", "remotes", "stashes"].filter((k) => (now?.[k] ?? null) !== baseline[k]);
   // Baselines saved before this field existed have no fingerprint to compare.
-  if (Object.hasOwn(baseline, "protected_state") && (now?.protected_state ?? null) !== baseline.protected_state) changed.push("protected_state");
+  if (Object.hasOwn(baseline, "protected_state")) {
+    if ((now?.protected_state ?? null) !== baseline.protected_state) changed.push("protected_state");
+  } else if (Object.hasOwn(baseline, "git_internals")) {
+    // A baseline from the short-lived git_internals version cannot be compared: fail closed.
+    changed.push("protected_state");
+  }
   if (changed.length === 0) {
     if (!quiet) console.log("GIT GUARD: OK (no commits, branch, ref, remote, stash, config or hook changes)");
     return { ok: true, changed, now };
@@ -772,6 +802,40 @@ async function checkClaudeQuota(roleName, auth) {
   const ongoing = claudeOngoing(runs, "subscription", rules.subscription);
   const decision = evaluateSubscriptionGate({ role: roleName, snapshot, override, ongoing, rules: rules.subscription });
   return { decision, snapshot, ongoing, errors, rules };
+}
+
+/**
+ * Cross-runtime lock for Claude admission. Every local runtime runs as the same user, so a file in
+ * the user's temp directory is shared by the Claude Code and Codex installations. A lock whose
+ * owner process is gone, or that is older than two minutes, is stale and taken over.
+ * Input: wait timeout. Output: Promise<release function>; exits 2 if the lock stays busy.
+ */
+const ADMISSION_LOCK = path.join(os.tmpdir(), "orchestration-claude-admission.lock");
+async function acquireAdmissionLock(timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try { fs.writeFileSync(ADMISSION_LOCK, `${process.pid}\n${Date.now()}\n`, { flag: "wx" }); break; }
+    catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      let owner = null;
+      let lockedAt = 0;
+      try { [owner, lockedAt] = fs.readFileSync(ADMISSION_LOCK, "utf8").trim().split("\n").map(Number); } catch {}
+      let alive = false;
+      if (Number.isInteger(owner) && owner > 0) {
+        try { process.kill(owner, 0); alive = true; } catch (err) { alive = err.code === "EPERM"; }
+      }
+      if (!alive || !(Date.now() - lockedAt < 120000)) { fs.rmSync(ADMISSION_LOCK, { force: true }); continue; }
+      if (Date.now() > deadline) fail("another Claude delegation is being admitted; try again shortly");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  const release = () => {
+    try { if (fs.readFileSync(ADMISSION_LOCK, "utf8").startsWith(`${process.pid}\n`)) fs.rmSync(ADMISSION_LOCK, { force: true }); } catch {}
+    process.removeListener("exit", release);
+  };
+  // fail() and the quota gate exit the process; release on exit too.
+  process.once("exit", release);
+  return release;
 }
 
 async function enforceClaudeQuota(roleName, auth, taskId) {
@@ -941,6 +1005,9 @@ async function cmdRun(options) {
   if (useClaude && claudeAuth === "api") {
     try { claudeBudgetUsd = loadClaudeQuotaRules(QUOTA_CONFIG_FILE, CLAUDE_ROLES).api.roles[roleName]; } catch (e) { fail(e.message); }
   }
+  // Claude admission is serialized from the gate check until the run record (its reservation)
+  // exists, so two launches cannot both pass against the same remaining quota.
+  const releaseAdmission = useClaude && !options["dry-run"] ? await acquireAdmissionLock() : null;
   if (!options["dry-run"]) {
     quotaGate = useClaude ? (await enforceClaudeQuota(roleName, claudeAuth, taskIdRaw)).record : await enforceQuota(roleName, taskIdRaw);
   }
@@ -1056,6 +1123,7 @@ async function cmdRun(options) {
   };
   if (worktree) run.worktree = worktree;
   saveRun(run, "run_started");
+  releaseAdmission?.();
 
   console.log(`DELEGATE: run=${run.run_id}`);
   console.log(`DELEGATE: role=${roleName} model=${model} effort=${effort} sandbox=${run.sandbox} cwd=${cwd}`);
@@ -1892,11 +1960,12 @@ function cmdMetrics(options) {
 }
 
 export async function main(backend) {
+  // Before argument parsing, so its errors name the gateway that was invoked.
+  if (backend === "claude") gatewayName = "claude-delegate";
   const [command, ...rest] = process.argv.slice(2);
   const { options, positionals } = parseArgs(rest);
   // Other commands act on run records, which carry their own backend.
   if (backend && ["run", "which", "models", "config", "quota"].includes(command)) options.backend = backend;
-  if (backend === "claude") gatewayName = "claude-delegate";
 
   switch (command) {
     case "run":

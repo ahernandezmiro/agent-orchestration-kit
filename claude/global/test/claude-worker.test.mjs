@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const repo = fileURLToPath(new URL("../../../", import.meta.url));
@@ -32,9 +32,13 @@ for (const file of (process.env.TEST_EDIT_FILES || "").split(",").filter(Boolean
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, "edited by stub\\n");
 }
+if (process.env.TEST_WAIT_FILE) {
+  const deadline = Date.now() + 20000;
+  while (!fs.existsSync(process.env.TEST_WAIT_FILE) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+}
 const mode = process.env.TEST_CLAUDE_FAILURE;
 const env = Object.fromEntries(["CLAUDE_CODE_DISABLE_CLAUDE_MDS", "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
-  "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS", "CLAUDE_CODE_OAUTH_TOKEN"].map((k) => [k, process.env[k] ?? null]));
+  "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL"].map((k) => [k, process.env[k] ?? null]));
 console.log(JSON.stringify({ type: "result", subtype: mode === "budget" ? "error_max_budget_usd" : mode ? "error_during_execution" : "success",
   is_error: Boolean(mode), session_id: "stub-claude", usage: { input_tokens: 3, output_tokens: 5 }, total_cost_usd: 0.25,
   ...(mode ? { errors: mode === "budget" ? [] : ["stub execution failure"] } : { result: "status: completed" }),
@@ -83,7 +87,16 @@ function fixture(t) {
   const runRecord = (stdout) => JSON.parse(success(dispatch(["show", /DELEGATE: run=(\S+)/.exec(stdout)[1], "--json"])));
   const workerOutput = (run) => JSON.parse(fs.readFileSync(path.join(run.exec.job_dir, "events.jsonl"), "utf8"));
   const events = () => fs.readFileSync(path.join(runtime, "telemetry", "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  return { home, runtime, claudeConfig, project, setUsage, snapshot, packet, dispatch, codex: gateway("codex-delegate.mjs"), runRecord, workerOutput, events, node };
+  // Non-blocking variant, for launches that must overlap.
+  const dispatchAsync = (args, extra = {}) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(runtime, "scripts", "claude-delegate.mjs"), ...args], { cwd: home, env: { ...env, ...extra } });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+  return { home, runtime, claudeConfig, project, setUsage, snapshot, packet, dispatch, dispatchAsync, codex: gateway("codex-delegate.mjs"), runRecord, workerOutput, events, node, git };
 }
 
 function success(result) {
@@ -97,7 +110,8 @@ const arg = (args, flag) => args[args.indexOf(flag) + 1];
 test("subscription is the default: no --bare, API key withheld, isolation set, login passed through", (t) => {
   const f = fixture(t);
   const key = "sk-ant-api-should-not-reach";
-  const out = success(f.dispatch(["run", "--role", "astra-review", "--packet", review, "--cwd", f.project], { ANTHROPIC_API_KEY: key }));
+  const out = success(f.dispatch(["run", "--role", "astra-review", "--packet", review, "--cwd", f.project],
+    { ANTHROPIC_API_KEY: key, CLAUDE_CODE_EFFORT_LEVEL: "low", ANTHROPIC_MODEL: "claude-other" }));
   assert.match(out, /QUOTA GATE: OK backend=claude auth=subscription role=astra-review/);
   const run = f.runRecord(out);
   const worker = f.workerOutput(run);
@@ -106,7 +120,12 @@ test("subscription is the default: no --bare, API key withheld, isolation set, l
   assert.equal(arg(worker.args, "--disallowedTools"), "mcp__*,Agent");
   assert.ok(!worker.args.includes("--max-budget-usd"));
   assert.deepEqual(worker.env, { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
-    CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1", CLAUDE_CODE_OAUTH_TOKEN: "subscription-token" });
+    CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1", CLAUDE_CODE_OAUTH_TOKEN: "subscription-token",
+    CLAUDE_CODE_EFFORT_LEVEL: null, ANTHROPIC_MODEL: null }, "inherited model and effort overrides are removed");
+  assert.ok(worker.args.includes("--safe-mode"));
+  const deployed = JSON.parse(fs.readFileSync(path.join(f.runtime, "deployed.json"), "utf8"));
+  assert.equal(deployed.claude.auth, "subscription");
+  assert.equal(deployed.claude.roles["sol-implement"].model, "opus");
   assert.equal(run.claude_auth, "subscription");
   assert.equal(run.model, "sonnet");
   assert.equal(run.quota_gate.allowed, true);
@@ -198,6 +217,44 @@ test("a worker change under .claude or to .git config or hooks fails the git gua
   assert.match(clean, /GIT GUARD: OK \(no commits, branch, ref, remote, stash, config or hook changes\)/);
 });
 
+// R8: admission is serialized, so overlapping launches cannot both spend the same remaining quota.
+test("two overlapping launches that only fit once: exactly one is admitted", async (t) => {
+  const f = fixture(t);
+  f.setUsage(75); // 25% left; sol-implement reserves 20%
+  const wait = path.join(f.home, "release-workers");
+  const launch = () => f.dispatchAsync(["run", "--role", "sol-implement", "--packet", f.packet("sol-implement"), "--cwd", f.project, "--background"], { TEST_WAIT_FILE: wait });
+  const results = await Promise.all([launch(), launch()]);
+  fs.writeFileSync(wait, "go");
+  assert.deepEqual(results.map((r) => r.status).sort(), [0, 5], results.map((r) => r.stdout + r.stderr).join("\n----\n"));
+  const admitted = results.find((r) => r.status === 0);
+  success(f.dispatch(["collect", /DELEGATE: run=(\S+)/.exec(admitted.stdout)[1], "--wait"]));
+});
+
+// R7 with --worktree: sibling worktrees appearing during a run are not a guard violation, but a
+// hooks folder named by core.hooksPath is protected even when .gitignore hides it.
+test("sibling worktrees do not trip the guard; an ignored core.hooksPath folder does", (t) => {
+  const f = fixture(t);
+  const wait = path.join(f.home, "release-worker");
+  // --worktree runs ignore other branches by design; their fingerprint must ignore sibling worktrees too.
+  const started = success(f.dispatch(["run", "--role", "luna-implement", "--packet", f.packet("luna-implement"), "--cwd", f.project, "--background", "--worktree"],
+    { TEST_WAIT_FILE: wait, TEST_EDIT_FILES: "src/ok.txt" }));
+  const sibling = path.join(f.home, "sibling-worktree");
+  assert.equal(f.git("worktree", "add", "-q", "-b", "sibling", sibling).status, 0);
+  fs.writeFileSync(wait, "go");
+  const collected = f.dispatch(["collect", /DELEGATE: run=(\S+)/.exec(started)[1], "--wait"]);
+  assert.equal(collected.status, 0, collected.stdout + collected.stderr);
+  assert.match(collected.stdout, /GIT GUARD: OK/);
+  f.git("worktree", "remove", "--force", sibling);
+
+  fs.mkdirSync(path.join(f.project, ".githooks"));
+  fs.writeFileSync(path.join(f.project, ".githooks", "pre-commit"), "#!/bin/sh\n");
+  fs.writeFileSync(path.join(f.project, ".gitignore"), ".githooks/\n");
+  f.git("config", "core.hooksPath", ".githooks");
+  const hooked = f.dispatch(["run", "--role", "luna-implement", "--packet", f.packet("luna-implement"), "--cwd", f.project], { TEST_EDIT_FILES: ".githooks/pre-commit" });
+  assert.equal(hooked.status, 3, hooked.stdout + hooked.stderr);
+  assert.ok(f.runRecord(hooked.stdout).git_guard.changed.includes("protected_state"));
+});
+
 // R2, R4
 test("Claude gateway rejects luna-test and unsafe or empty editable_paths before submitting", (t) => {
   const f = fixture(t);
@@ -274,6 +331,7 @@ test("Claude gateway reports its config, names itself in errors, totals usage an
   assert.equal(writer.status, 2);
   assert.match(writer.stderr, /^claude-delegate: Claude delegation supports/);
   assert.match(f.codex(["run"]).stderr, /^codex-delegate: /);
+  assert.match(f.dispatch(["run", "--role"]).stderr, /^claude-delegate: missing value for --role/, "argument errors name the gateway too");
   const badAuth = f.dispatch(["models"], { ORCH_CLAUDE_AUTH: "oauth" });
   assert.equal(badAuth.status, 2);
   assert.match(badAuth.stderr, /ORCH_CLAUDE_AUTH must be one of: subscription, api/);

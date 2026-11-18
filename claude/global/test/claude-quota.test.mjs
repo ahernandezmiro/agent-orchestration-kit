@@ -108,7 +108,13 @@ test("parseUsageResponse reads five_hour/seven_day and the limits[] form", () =>
     { fiveHour: { usedPercent: 42, resetsAt: SEC("2026-11-17T15:00:00Z") }, sevenDay: { usedPercent: 7.5, resetsAt: null } });
   assert.deepEqual(parseUsageResponse({ limits: [{ kind: "session", percent: 3, resets_at: "2026-11-17T15:00:00Z" }, { kind: "weekly_all", percent: 50 }] }).sevenDay,
     { usedPercent: 50, resetsAt: null });
-  assert.equal(parseUsageResponse({ seven_day: { utilization: 1 } }), null);
+  assert.match(parseUsageResponse({ seven_day: { utilization: 1 } }).error, /no 5-hour window/);
+  // Fail closed on readings that are present but unusable.
+  for (const body of [{ five_hour: { utilization: -50 } }, { five_hour: { utilization: 140 } }, { five_hour: { utilization: "abc" } },
+    { five_hour: { utilization: 10 }, seven_day: { utilization: -5 } }, { five_hour: { utilization: 10, resets_at: "not a date" } }]) {
+    assert.match(parseUsageResponse(body).error, /invalid window/, JSON.stringify(body));
+  }
+  assert.equal(parseUsageResponse({ five_hour: { utilization: 10 } }).sevenDay, null, "an absent weekly window is reported as null");
 });
 
 // R8: same formula as the Codex gate on the 5-hour window, plus a 7-day floor; fails closed.
@@ -119,8 +125,10 @@ test("evaluateSubscriptionGate allows, blocks on either window, on a rejection, 
   assert.match(gate(snap(90, 20)).reason, /5h effective 10% <= 10%/);
   assert.equal(gate(snap(50, 20), { ongoing: [{ reserved: 45 }] }).allowed, false);
   assert.match(gate(snap(10, 95)).reason, /7d remaining 5% <= 10% floor/);
-  assert.equal(gate(snap(10, null)).allowed, true, "plans without a weekly window are gated on 5h only");
-  assert.equal(gate(snap(99, 99, SEC("2026-11-17T11:00:00Z"))).allowed, true, "a window past its reset counts as unused");
+  assert.match(gate(snap(10, null)).reason, /no valid 7-day reading/, "a missing weekly reading blocks by default");
+  assert.equal(gate(snap(10, null), { rules: { ...subRules, sevenDayMinRemaining: null } }).allowed, true, "weekly check turned off explicitly");
+  assert.match(gate(snap(10, 10, SEC("2026-11-17T11:00:00Z"))).reason, /already reset/, "a reading from a reset window blocks");
+  assert.match(gate({ fiveHour: { usedPercent: -50, resetsAt: null }, sevenDay: { usedPercent: 0, resetsAt: null } }).reason, /no valid reading/);
   assert.match(gate(null).reason, /quota unknown/);
   assert.match(gate(snap(0, 0), { override: { resetsAt: SEC("2026-11-17T13:00:00Z") } }).reason, /rejected a request; blocked until 2026-11-17T13:00:00.000Z/);
 });
@@ -131,10 +139,13 @@ test("claudeOngoing counts only Claude runs of the same auth mode within the win
     { run_id: "b", backend: "claude", claude_auth: "api", role: "luna-implement", status: "running", started_at: "2026-11-17T11:00:00Z" },
     { run_id: "c", backend: "exec", role: "luna-implement", status: "running", started_at: "2026-11-17T11:00:00Z" },
     { run_id: "d", backend: "claude", claude_auth: "subscription", role: "astra-review", status: "running", started_at: "2026-11-17T05:00:00Z" },
-    { run_id: "e", backend: "claude", role: "astra-review", status: "submitted_background", started_at: "2026-11-17T11:30:00Z" }
+    { run_id: "e", backend: "claude", role: "astra-review", status: "submitted_background", started_at: "2026-11-17T11:30:00Z" },
+    { run_id: "f", backend: "claude", claude_auth: "subscription", role: "astra-review", status: "running", started_at: "2026-11-17T11:00:00Z", quota_gate: { required: 40 } },
+    { run_id: "g", backend: "claude", claude_auth: "api", role: "astra-review", status: "running", started_at: "2026-11-17T11:00:00Z", claude_max_budget_usd: 10, quota_gate: { required: 10 } }
   ];
-  assert.deepEqual(claudeOngoing(runs, "subscription", subRules, NOW).map((r) => [r.run_id, r.reserved]), [["a", 10]]);
-  assert.deepEqual(claudeOngoing(runs, "api", apiRules, NOW).map((r) => r.run_id), ["b", "e"], "records without claude_auth are API-key runs");
+  // A run keeps the amount it was admitted with, whatever this runtime's config says now.
+  assert.deepEqual(claudeOngoing(runs, "subscription", subRules, NOW).map((r) => [r.run_id, r.reserved]), [["a", 10], ["f", 40]]);
+  assert.deepEqual(claudeOngoing(runs, "api", apiRules, NOW).map((r) => [r.run_id, r.reserved]), [["b", 2], ["e", 1], ["g", 10]], "records without claude_auth are API-key runs");
 });
 
 test("evaluateApiGate sums recorded spend, charges unknown cost at the reservation and adds in-flight reservations", () => {
@@ -142,15 +153,19 @@ test("evaluateApiGate sums recorded spend, charges unknown cost at the reservati
   const runs = [
     run("spent", { status: "completed", claude_cost_usd: 3.5 }),
     run("unknown", { status: "failed" }),
-    run("abandoned", { status: "abandoned" }),
+    run("abandoned", { status: "abandoned", claude_max_budget_usd: 2 }),
     run("flight", { status: "running" }),
     run("old", { status: "completed", claude_cost_usd: 50, started_at: "2026-11-15T10:00:00Z" }),
     { ...run("sub", { status: "completed", claude_cost_usd: 50 }), claude_auth: "subscription" }
   ];
-  const ok = evaluateApiGate({ role: "astra-review", runs, rules: apiRules, nowMs: NOW });
-  assert.deepEqual([ok.allowed, ok.spent, ok.reserved], [true, 5.5, 2]);
-  assert.match(ok.reason, /\$10\.00 budget - \$5\.50 spent - \$2\.00 reserved - \$1\.00 needed = \$1\.50/);
-  assert.equal(evaluateApiGate({ role: "sol-implement", runs, rules: apiRules, nowMs: NOW }).allowed, false);
+  // An abandoned run's worker may still be spending: its unknown cost counts its full cap.
+  const ok = evaluateApiGate({ role: "astra-review", runs, rules: { ...apiRules, budgetUsd: 12 }, nowMs: NOW });
+  assert.deepEqual([ok.allowed, ok.spent, ok.reserved], [true, 7.5, 2]);
+  assert.match(ok.reason, /\$12\.00 budget - \$7\.50 spent - \$2\.00 reserved - \$1\.00 needed = \$1\.50/);
+  assert.equal(evaluateApiGate({ role: "astra-review", runs, rules: apiRules, nowMs: NOW }).allowed, false);
+  // A run capped at $10 by another runtime's config reserves $10 here, not this runtime's $2.
+  const bigRun = run("big", { status: "running", claude_max_budget_usd: 10 });
+  assert.equal(evaluateApiGate({ role: "astra-review", runs: [bigRun], rules: apiRules, nowMs: NOW }).allowed, false);
 });
 
 test("loadClaudeQuotaRules requires the claude block and validates every role and number", (t) => {
@@ -201,7 +216,7 @@ test("readSubscriptionSnapshot reads the live endpoint with the stored login and
 
   credentials({ accessToken: token, expiresAt: NOW + 3600_000 });
   const live = await readSubscriptionSnapshot({ readTimeoutMs: 2000, env, nowMs: NOW });
-  assert.deepEqual(live.snapshot, { fiveHour: { usedPercent: 30, resetsAt: SEC("2026-11-17T15:00:00Z") }, sevenDay: { usedPercent: 60, resetsAt: SEC("2026-11-20T00:00:00Z") }, source: "live" });
+  assert.deepEqual(live.snapshot, { fiveHour: { usedPercent: 30, resetsAt: SEC("2026-11-17T15:00:00Z") }, sevenDay: { usedPercent: 60, resetsAt: SEC("2026-11-20T00:00:00Z") }, source: "live (credentials file)" });
   assert.deepEqual(seen[0], { auth: `Bearer ${token}`, beta: "oauth-2025-04-20", url: "/api/oauth/usage" });
 
   credentials({ accessToken: token, expiresAt: NOW - 1 });
@@ -216,9 +231,25 @@ test("readSubscriptionSnapshot reads the live endpoint with the stored login and
   credentials({ accessToken: token });
   const remote = await readSubscriptionSnapshot({ readTimeoutMs: 2000, env: { ...env, CLAUDE_USAGE_URL: "https://example.com/usage" }, nowMs: NOW });
   assert.match(remote.errors[0], /only point at localhost/);
-  for (const result of [live, expired, remote]) assert.ok(!JSON.stringify(result).includes(token));
+  // A malformed or truncated credentials file never echoes its content (JSON.parse messages quote input).
+  const leaks = [];
+  for (const text of [`{"claudeAiOauth":{"accessToken":"${token}"`, token, `${token}{}`]) {
+    fs.writeFileSync(path.join(config, ".credentials.json"), text);
+    const result = await readSubscriptionSnapshot({ readTimeoutMs: 2000, env, nowMs: NOW });
+    assert.match(result.errors[0], /is not valid JSON/);
+    leaks.push(result);
+  }
+  for (const result of [live, expired, remote, ...leaks]) assert.ok(!JSON.stringify(result).includes(token.slice(0, 10)));
+
+  // CLAUDE_CODE_OAUTH_TOKEN overrides the file for the worker, so the gate must read that account too.
+  const envToken = "sk-ant-oat-env-account";
+  credentials({ accessToken: token });
+  const fromEnv = await readSubscriptionSnapshot({ readTimeoutMs: 2000, env: { ...env, CLAUDE_CODE_OAUTH_TOKEN: envToken }, nowMs: NOW });
+  assert.equal(seen.at(-1).auth, `Bearer ${envToken}`);
+  assert.equal(fromEnv.snapshot, null, "the stub only accepts the file token, so the env account's usage is not borrowed");
+  assert.match(fromEnv.errors[0], /answered 401/);
 
   const snapshotFile = path.join(config, "snap.json");
-  fs.writeFileSync(snapshotFile, JSON.stringify({ fiveHour: { usedPercent: 5 } }));
+  fs.writeFileSync(snapshotFile, JSON.stringify({ fiveHour: { usedPercent: 5 }, sevenDay: { usedPercent: 1 } }));
   assert.equal((await readSubscriptionSnapshot({ readTimeoutMs: 2000, env: { ...env, CLAUDE_QUOTA_SNAPSHOT: snapshotFile } })).snapshot.fiveHour.usedPercent, 5);
 });

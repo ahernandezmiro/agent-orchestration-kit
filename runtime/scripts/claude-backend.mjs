@@ -47,11 +47,14 @@ export function supportsClaudeVersion(version) {
   return major > minMajor || (major === minMajor && (minor > minMinor || (minor === minMinor && patch >= minPatch)));
 }
 
-// Never forward a third-party provider, proxy or nested-session marker to a worker.
+// Never forward a third-party provider, proxy or nested-session marker to a worker, nor model or
+// effort overrides that would make the run differ from what --model/--effort and the run record say.
 const SHARED_UNSET = [
   "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_FOUNDRY_API_KEY",
   "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-  "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"
+  "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"
 ];
 
 /**
@@ -124,7 +127,9 @@ export function buildClaudeArgs({ model, effort, auth = "subscription", write = 
   if (!CLAUDE_AUTH_MODES.includes(auth)) throw new Error(`unsupported Claude auth mode: ${auth}`);
   if (write && !editRules.length) throw new Error("a Claude write run needs edit rules");
   const args = auth === "api" ? ["--bare"] : [];
-  args.push("--restricted", "--strict-mcp-config", "--disable-slash-commands", "--print", "--output-format", "json",
+  // --safe-mode turns off every customization (CLAUDE.md, skills, plugins, hooks, MCP, agents...)
+  // while auth and permissions keep working; the narrower flags below stay as belt and braces.
+  args.push("--safe-mode", "--restricted", "--strict-mcp-config", "--disable-slash-commands", "--print", "--output-format", "json",
     "--no-session-persistence", "--permission-mode", "dontAsk", "--permission-prompts", "none",
     "--settings", JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false }),
     "--tools", write ? WRITE_TOOLS : READ_TOOLS,

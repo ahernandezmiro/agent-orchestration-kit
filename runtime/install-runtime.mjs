@@ -51,6 +51,12 @@ export function deploymentRecord(destination, client) {
   };
   const commit = git("rev-parse", "HEAD");
   const models = spawnSync(process.execPath, [path.join(destination, "scripts", "codex-delegate.mjs"), "models", "--json"], { encoding: "utf8" });
+  // The Claude selection as configured, without the operator's ORCH_CLAUDE_* overrides of this shell.
+  const claudeEnv = { ...process.env };
+  delete claudeEnv.ORCH_CLAUDE_MODEL;
+  delete claudeEnv.ORCH_CLAUDE_AUTH;
+  const claude = spawnSync(process.execPath, [path.join(destination, "scripts", "claude-delegate.mjs"), "models", "--json"], { encoding: "utf8", env: claudeEnv });
+  const claudeModels = claude.status === 0 ? JSON.parse(claude.stdout) : null;
   return {
     client,
     commit,
@@ -58,6 +64,7 @@ export function deploymentRecord(destination, client) {
     deployed_at: new Date().toISOString(),
     host: os.hostname(),
     platform: process.platform,
-    models: models.status === 0 ? JSON.parse(models.stdout).roles : null
+    models: models.status === 0 ? JSON.parse(models.stdout).roles : null,
+    claude: claudeModels ? { auth: claudeModels.auth, roles: claudeModels.roles } : null
   };
 }
