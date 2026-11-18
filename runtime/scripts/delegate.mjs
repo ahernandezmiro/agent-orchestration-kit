@@ -119,6 +119,42 @@ const isDetached = (backend) => backend === "exec" || backend === "claude";
 // Roles the Claude gateway runs. luna-test needs a shell to run checks, which Claude workers lack.
 const CLAUDE_ROLES = Object.keys(ROLES).filter((name) => ROLES[name].claude);
 
+// Keep stored role IDs stable for run history, quota accounting and frozen prompt files.
+const ROLE_NAMES = new Map([
+  ["luna-implement", "implement"],
+  ["luna-test", "test"],
+  ["sol-implement", "implement-escalated"],
+  ["astra-review", "review"],
+  ["astra-investigate", "investigate"]
+]);
+const ROLE_IDS = new Map([...ROLE_NAMES].map(([id, name]) => [name, id]));
+const publicRole = (id) => ROLE_NAMES.get(id) ?? id;
+const storedRole = (name) => ROLE_IDS.get(name) ?? name;
+const listRoles = (roles) => roles.map(publicRole).join(", ");
+const withPublicRole = (entry) => ({ ...entry, role: publicRole(entry.role) });
+
+function resolveRole(name, useClaude) {
+  const id = storedRole(name);
+  if (useClaude && !CLAUDE_ROLES.includes(id)) fail(`Claude delegation supports ${listRoles(CLAUDE_ROLES)}`);
+  if (!Object.hasOwn(ROLES, id)) fail(`--role must be one of: ${listRoles(Object.keys(ROLES))}`);
+  return id;
+}
+
+// An alias can supply fields a canonical key omits. Canonical fields win within each file.
+function mergeModelRoles(target, roles, invalidRole) {
+  for (const name of Object.keys(roles)) {
+    if (!Object.hasOwn(target, storedRole(name))) invalidRole(name);
+  }
+  for (const [id, selection] of Object.entries(target)) {
+    for (const name of [id, publicRole(id)]) {
+      if (!Object.hasOwn(roles, name)) continue;
+      for (const key of ["model", "effort"]) {
+        if (roles[name]?.[key] != null) selection[key] = roles[name][key];
+      }
+    }
+  }
+}
+
 function resolveClaudeBin() {
   const env = { ...process.env };
   for (const name of ["ANTHROPIC_API_KEY", ...claudeWorkerEnv("api").unset]) delete env[name];
@@ -146,19 +182,13 @@ export function readModelSelection(files = MODEL_CONFIG_FILES) {
   for (const file of files.filter((f) => fs.existsSync(f))) {
     let config;
     try { config = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { throw new Error(`invalid JSON in ${file}: ${e.message}`); }
-    for (const [roleName, values] of Object.entries(config.roles ?? {})) {
-      if (!ROLES[roleName]) throw new Error(`${file}: unknown role '${roleName}' (roles: ${Object.keys(ROLES).join(", ")})`);
-      for (const key of ["model", "effort"]) {
-        if (values?.[key] != null) selection[roleName][key] = values[key];
-      }
-    }
+    mergeModelRoles(selection, config.roles ?? {}, (name) => {
+      throw new Error(`${file}: unknown role '${name}' (roles: ${listRoles(Object.keys(ROLES))})`);
+    });
     if (config.claude?.auth != null) claude.auth = config.claude.auth;
-    for (const [roleName, values] of Object.entries(config.claude?.roles ?? {})) {
-      if (!CLAUDE_ROLES.includes(roleName)) throw new Error(`${file}: claude.roles has unsupported role '${roleName}' (Claude roles: ${CLAUDE_ROLES.join(", ")})`);
-      for (const key of ["model", "effort"]) {
-        if (values?.[key] != null) claude.roles[roleName][key] = values[key];
-      }
-    }
+    mergeModelRoles(claude.roles, config.claude?.roles ?? {}, (name) => {
+      throw new Error(`${file}: claude.roles has unsupported role '${name}' (Claude roles: ${listRoles(CLAUDE_ROLES)})`);
+    });
     sources.push(file);
   }
   for (const [roleName, { model, effort }] of Object.entries(selection)) {
@@ -212,13 +242,18 @@ function findProjectConfig(startDir) {
   if (Object.hasOwn(config, "review_safe") && typeof config.review_safe !== "boolean") problem("review_safe must be a boolean");
   if (Object.hasOwn(config, "roles") && (!config.roles || Array.isArray(config.roles) || typeof config.roles !== "object")) problem("roles must be an object");
   for (const [roleName, values] of Object.entries(config.roles || {})) {
-    if (!Object.hasOwn(ROLES, roleName)) problem(`unknown role '${roleName}'`);
+    if (!Object.hasOwn(ROLES, storedRole(roleName))) problem(`unknown role '${roleName}'`);
     if (!values || Array.isArray(values) || typeof values !== "object") problem(`roles.${roleName} must be an object`);
     for (const key of Object.keys(values)) if (!["model", "effort"].includes(key)) problem(`roles.${roleName} has unknown key '${key}'`);
     if (Object.hasOwn(values, "model") && (typeof values.model !== "string" || !values.model.trim())) problem(`roles.${roleName}.model must be a non-empty string`);
     if (Object.hasOwn(values, "effort") && !VALID_EFFORTS.includes(values.effort)) problem(`roles.${roleName}.effort must be one of: ${VALID_EFFORTS.join(", ")}`);
   }
   return { file, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), config };
+}
+
+function projectRoleSelection(project, id) {
+  const roles = project?.config.roles;
+  return { ...roles?.[id], ...roles?.[publicRole(id)] };
 }
 
 /**
@@ -230,7 +265,7 @@ function findRolePrompt(startDir, roleName) {
   if (!role) fail(`unknown role '${roleName}'`);
   const ignored = [];
   const warnings = [];
-  const knownFiles = new Set(Object.keys(ROLES).map((name) => `${name}.md`));
+  const knownFiles = new Set([...ROLE_NAMES.keys(), ...ROLE_IDS.keys()].map((name) => `${name}.md`));
   const start = path.resolve(startDir);
   const rootValue = git(start, ["rev-parse", "--show-toplevel"]);
   const root = rootValue ? path.resolve(rootValue) : start;
@@ -271,14 +306,16 @@ function findRolePrompt(startDir, roleName) {
     if (byteLength > 65536) fail(`role prompt exceeds 65536 bytes: ${file}`);
     return { source, path: file, text, sha256: crypto.createHash("sha256").update(text, "utf8").digest("hex"), ignored, warnings };
   };
+  const findOverride = (dir) => [publicRole(roleName), roleName]
+    .map((name) => path.join(dir, `${name}.md`))
+    .find((file) => fs.existsSync(file) && fs.statSync(file).isFile());
 
   for (const projectDir of dirs) {
     const orchestrationDir = path.join(projectDir, ".orchestration");
     const rolesDir = path.join(orchestrationDir, "roles");
     inspectRolesDir(rolesDir);
-    const file = path.join(rolesDir, `${roleName}.md`);
-    if (!fs.existsSync(file)) continue;
-    if (!fs.statSync(file).isFile()) continue;
+    const file = findOverride(rolesDir);
+    if (!file) continue;
     if (roleName.startsWith("astra-")) {
       const reviewConfig = path.join(orchestrationDir, "project.json");
       let reviewSafe = false;
@@ -298,9 +335,8 @@ function findRolePrompt(startDir, roleName) {
 
   const globalDir = path.join(KIT_ROOT, "overrides", "roles");
   inspectRolesDir(globalDir);
-  const globalFile = path.join(globalDir, `${roleName}.md`);
-  // inspectRolesDir already warned about a non-file entry here; do not warn twice.
-  const global = fs.existsSync(globalFile) && fs.statSync(globalFile).isFile() ? readPrompt(globalFile, "global") : null;
+  const globalFile = findOverride(globalDir);
+  const global = globalFile ? readPrompt(globalFile, "global") : null;
   if (global) return global;
   const defaultFile = path.join(KIT_ROOT, "prompts", "roles", role.defaultPrompt);
   const fallback = readPrompt(defaultFile, "default");
@@ -878,7 +914,7 @@ async function acquireAdmissionLock(timeoutMs = 60000) {
 async function enforceClaudeQuota(roleName, auth, taskId) {
   const { decision, snapshot, ongoing, errors, rules } = await checkClaudeQuota(roleName, auth);
   for (const e of errors) console.log(`QUOTA GATE: source error — ${e}`);
-  console.log(formatClaudeGateLine(auth, decision, snapshot, ongoing));
+  console.log(formatClaudeGateLine(auth, withPublicRole(decision), snapshot, ongoing.map(withPublicRole)));
   const { ongoing: _omit, ...rest } = decision;
   const record = { ...rest, backend: "claude", auth, source: snapshot?.source ?? (auth === "api" ? "run-records" : null),
     five_hour: snapshot?.fiveHour ?? null, seven_day: snapshot?.sevenDay ?? null, ongoing_run_ids: ongoing.map((r) => r.run_id) };
@@ -930,7 +966,7 @@ async function checkQuota(roleName) {
 async function enforceQuota(roleName, taskId) {
   const { decision, snapshot, ongoing, errors } = await checkQuota(roleName);
   for (const e of errors) console.log(`QUOTA GATE: source error — ${e}`);
-  console.log(formatGateLine(decision, snapshot, ongoing));
+  console.log(formatGateLine(withPublicRole(decision), snapshot, ongoing.map(withPublicRole)));
   const record = { ...decision, used_percent: snapshot?.usedPercent ?? null, resets_at: snapshot?.resetsAt ?? null,
     source: snapshot?.source ?? null, ongoing_run_ids: ongoing.map((r) => r.run_id) };
   if (!decision.allowed) {
@@ -947,41 +983,42 @@ async function enforceQuota(roleName, taskId) {
  */
 async function cmdQuota(options) {
   if (options.backend === "claude") {
-    if (options.role && !CLAUDE_ROLES.includes(options.role)) fail(`--role must be one of: ${CLAUDE_ROLES.join(", ")}`);
-    const roles = options.role ? [options.role] : CLAUDE_ROLES;
+    const roles = options.role ? [resolveRole(options.role, true)] : CLAUDE_ROLES;
     const results = [];
-    for (const role of roles) results.push({ role, auth: claudeSelection(role).auth, ...(await checkClaudeQuota(role, claudeSelection(role).auth)) });
-    if (options.json) console.log(JSON.stringify(results.map(({ rules, ...r }) => r), null, 2));
+    for (const role of roles) {
+      const { auth } = claudeSelection(role);
+      const { decision, snapshot, ongoing, errors } = await checkClaudeQuota(role, auth);
+      results.push({ role: publicRole(role), auth, decision: withPublicRole(decision), snapshot, ongoing: ongoing.map(withPublicRole), errors });
+    }
+    if (options.json) console.log(JSON.stringify(results, null, 2));
     else {
       for (const e of results[0]?.errors ?? []) console.log(`source error — ${e}`);
       for (const r of results) console.log(formatClaudeGateLine(r.auth, r.decision, r.snapshot, r.ongoing));
     }
     return results.every((r) => r.decision.allowed) ? 0 : QUOTA_BLOCKED_EXIT_CODE;
   }
-  const roleNames = options.role ? [options.role] : Object.keys(ROLES);
-  if (options.role && !ROLES[options.role]) fail(`--role must be one of: ${Object.keys(ROLES).join(", ")}`);
+  const roleNames = options.role ? [resolveRole(options.role, false)] : Object.keys(ROLES);
   let rules;
   try { rules = loadQuotaRules(QUOTA_CONFIG_FILE, Object.keys(ROLES)); } catch (e) { fail(e.message); }
   const { snapshot, errors } = await readQuotaSnapshot(rules);
   const ongoing = ongoingReservations(readAllRuns(), rules);
-  const decisions = roleNames.map((role) => evaluateQuotaGate({ role, snapshot, ongoing, rules }));
+  const decisions = roleNames.map((role) => withPublicRole(evaluateQuotaGate({ role, snapshot, ongoing, rules })));
+  const ongoingRoles = ongoing.map(withPublicRole);
   if (options.json) {
-    console.log(JSON.stringify({ snapshot, errors, ongoing, decisions }, null, 2));
+    console.log(JSON.stringify({ snapshot, errors, ongoing: ongoingRoles, decisions }, null, 2));
   } else {
     for (const e of errors) console.log(`source error — ${e}`);
-    for (const d of decisions) console.log(formatGateLine(d, snapshot, ongoing));
+    for (const d of decisions) console.log(formatGateLine(d, snapshot, ongoingRoles));
   }
   return decisions.every((d) => d.allowed) ? 0 : QUOTA_BLOCKED_EXIT_CODE;
 }
 
 async function cmdRun(options) {
-  const roleName = options.role;
-  let role = ROLES[roleName];
-  if (!Object.hasOwn(ROLES, roleName)) fail(`--role must be one of: ${Object.keys(ROLES).join(", ")}`);
   const backend = options.backend || process.env.ORCH_BACKEND || "exec";
   if (!isDetached(backend) && backend !== "companion") fail(`--backend must be exec or companion for Codex, or claude (got ${backend})`);
   const useClaude = backend === "claude";
-  if (useClaude && !role.claude) fail(`Claude delegation supports ${CLAUDE_ROLES.join(", ")}`);
+  const roleName = resolveRole(options.role, useClaude);
+  let role = ROLES[roleName];
   if (!options.packet) fail("--packet <file> is required");
   const packetPath = path.resolve(options.packet);
   if (!fs.existsSync(packetPath)) fail(`packet not found: ${packetPath}`);
@@ -993,7 +1030,7 @@ async function cmdRun(options) {
   console.log(`ROLE PROMPT: ${rolePrompt.source} ${rolePrompt.path}`);
   const modelSelection = useClaude ? claudeSelection(roleName) : loadModelSelection().selection[roleName];
   const claudeAuth = useClaude ? modelSelection.auth : null;
-  const projectRole = useClaude ? {} : project?.config.roles?.[roleName] || {};
+  const projectRole = useClaude ? {} : projectRoleSelection(project, roleName);
   const model = projectRole.model || modelSelection.model;
   const configuredEffort = projectRole.effort || modelSelection.effort;
   const effort = options.effort || configuredEffort;
@@ -1004,7 +1041,7 @@ async function cmdRun(options) {
   if (useClaude && !/^[a-z0-9][a-z0-9._\[\]-]*$/i.test(model)) fail(`invalid Claude model '${model}'`);
   let blocks = splitTopLevel(fs.readFileSync(packetPath, "utf8"));
   const missing = role.required.filter((k) => !blocks.some((b) => b.key === k));
-  if (missing.length) fail(`packet is missing required keys for ${roleName}: ${missing.join(", ")}`);
+  if (missing.length) fail(`packet is missing required keys for ${publicRole(roleName)}: ${missing.join(", ")}`);
 
   const originalKeys = blocks.map((b) => b.key);
   let strippedKeys = [];
@@ -1163,7 +1200,7 @@ async function cmdRun(options) {
   releaseAdmission?.();
 
   console.log(`DELEGATE: run=${run.run_id}`);
-  console.log(`DELEGATE: role=${roleName} model=${model} effort=${effort} sandbox=${run.sandbox} cwd=${cwd}`);
+  console.log(`DELEGATE: role=${publicRole(roleName)} model=${model} effort=${effort} sandbox=${run.sandbox} cwd=${cwd}`);
   if (run.reason) console.log(`DELEGATE: reason=${run.reason}`);
   console.log(`DELEGATE: prompt=${promptFile}`);
   if (project) {
@@ -1561,7 +1598,7 @@ async function cmdPassThrough(command, options, positionals) {
 function cmdRuns(options) {
   let runs = readAllRuns();
   const unfinalized = runs.filter((r) => UNFINALIZED_STATUSES.includes(r.status));
-  if (options.role) runs = runs.filter((r) => r.role === options.role);
+  if (options.role) runs = runs.filter((r) => r.role === storedRole(options.role));
   if (options.status) runs = runs.filter((r) => r.status === options.status);
   const limit = options.limit ? Number(options.limit) : 25;
   if (!Number.isInteger(limit) || limit < 1) fail("--limit must be an integer >= 1");
@@ -1577,7 +1614,7 @@ function cmdRuns(options) {
   console.log("started_at\trole\tmodel\tstatus\toutcome\tuseful\ttask_id\trun_id");
   for (const r of runs) {
     console.log([
-      r.started_at || "-", r.role || "-", r.model || "-", r.status || "-",
+      r.started_at || "-", publicRole(r.role) || "-", r.model || "-", r.status || "-",
       r.assessment?.outcome || "-", r.assessment?.useful || "-", r.task_id || "-", r.run_id || "-"
     ].join("\t"));
   }
@@ -1593,20 +1630,18 @@ function cmdRuns(options) {
  * Input: role positional, optional --cwd and --json. Output: exit code, with no quota check.
  */
 function cmdConfigExplain(options, positionals) {
-  const roleName = positionals[0];
-  if (!roleName || !ROLES[roleName]) fail(`config --explain <role> [--cwd <dir>] [--json]; role must be one of: ${Object.keys(ROLES).join(", ")}`);
+  const useClaude = options.backend === "claude";
+  const roleName = resolveRole(positionals[0], useClaude);
   const cwd = path.resolve(options.cwd || process.cwd());
   if (!fs.existsSync(cwd)) fail(`--cwd does not exist: ${cwd}`);
-  const useClaude = options.backend === "claude";
-  if (useClaude && !CLAUDE_ROLES.includes(roleName)) fail(`Claude delegation supports ${CLAUDE_ROLES.join(", ")}`);
   const project = findProjectConfig(cwd);
   const rolePrompt = findRolePrompt(cwd, roleName);
   const claude = useClaude ? claudeSelection(roleName) : null;
   const configured = claude || loadModelSelection().selection[roleName];
   // Project model overrides hold Codex model ids, so they apply to Codex workers only (as in run).
-  const projectRole = useClaude ? {} : project?.config.roles?.[roleName] || {};
+  const projectRole = useClaude ? {} : projectRoleSelection(project, roleName);
   const result = {
-    role: roleName,
+    role: publicRole(roleName),
     backend: useClaude ? "claude" : "codex",
     model: projectRole.model || configured.model,
     model_source: projectRole.model ? "project" : claude?.model_source || "config",
@@ -1651,7 +1686,7 @@ function cmdShow(options, positionals) {
     backend: run.backend ?? "companion",
     task_id: run.task_id,
     parent: run.parent,
-    role: run.role,
+    role: publicRole(run.role),
     model: run.model,
     effort: run.effort,
     reason: run.reason,
@@ -1890,7 +1925,7 @@ function readRunsFrom(dir, includeValidation = false) {
 function cmdMetrics(options) {
   let runs = options["runs-dir"] ? readRunsFrom(path.resolve(options["runs-dir"]), options.all) : readAllRuns();
   runs = runs.filter((r) => r.status !== "dry_run");
-  if (options.role) runs = runs.filter((r) => r.role === options.role);
+  if (options.role) runs = runs.filter((r) => r.role === storedRole(options.role));
   const sinceMs = parseSince(options.since);
   if (sinceMs != null) runs = runs.filter((r) => Date.parse(r.started_at || 0) >= sinceMs);
   if (options.by) {
@@ -2044,11 +2079,12 @@ export async function main(backend) {
         if (process.env.ORCH_CLAUDE_MODEL?.trim()) sources = [...sources, "ORCH_CLAUDE_MODEL"];
         if (process.env.ORCH_CLAUDE_AUTH?.trim()) sources = [...sources, "ORCH_CLAUDE_AUTH"];
       }
-      if (options.json) console.log(JSON.stringify({ sources, ...(auth ? { auth } : {}), roles: selection }, null, 2));
+      const roles = Object.fromEntries(Object.entries(selection).map(([id, values]) => [publicRole(id), values]));
+      if (options.json) console.log(JSON.stringify({ sources, ...(auth ? { auth } : {}), roles }, null, 2));
       else {
         console.log(`config: ${sources.join(" + ")}`);
         if (auth) console.log(`auth: ${auth}`);
-        for (const [roleName, { model, effort }] of Object.entries(selection)) console.log(`${roleName}\t${model}\t${effort}`);
+        for (const [roleName, { model, effort }] of Object.entries(roles)) console.log(`${roleName}\t${model}\t${effort}`);
       }
       process.exit(0);
     }

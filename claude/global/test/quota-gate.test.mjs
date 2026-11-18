@@ -140,7 +140,7 @@ test("CLI: a blocked run exits 5, creates no run record and logs a telemetry eve
   try {
     const r = runWithQuota(s, "astra-review", 80);
     assert.equal(r.status, 5, r.stdout + r.stderr);
-    assert.match(r.stdout, /QUOTA GATE: BLOCKED role=astra-review/);
+    assert.match(r.stdout, /QUOTA GATE: BLOCKED role=review/);
     assert.doesNotMatch(r.stdout, /DELEGATE: run=/);
     const runs = fs.existsSync(path.join(s.stage, "runs")) ? fs.readdirSync(path.join(s.stage, "runs")) : [];
     assert.deepEqual(runs, []);
@@ -154,7 +154,7 @@ test("CLI: an allowed run records the gate, and its reservation blocks the next 
   const s = stage();
   try {
     const first = runWithQuota(s, "luna-implement", 70);
-    assert.match(first.stdout, /QUOTA GATE: OK role=luna-implement/);
+    assert.match(first.stdout, /QUOTA GATE: OK role=implement/);
     assert.equal(first.status, 99, "reaches the stub companion");
     const [runFile] = fs.readdirSync(path.join(s.stage, "runs")).filter((f) => f.endsWith(".run.json"));
     const run = JSON.parse(fs.readFileSync(path.join(s.stage, "runs", runFile), "utf8"));
@@ -164,7 +164,7 @@ test("CLI: an allowed run records the gate, and its reservation blocks the next 
     fs.writeFileSync(path.join(s.stage, "runs", runFile), JSON.stringify({ ...run, status: "running" }));
     const second = runWithQuota(s, "astra-review", 70);
     assert.equal(second.status, 5, second.stdout + second.stderr);
-    assert.match(second.stdout, /reserved=10% \(ongoing: 1x luna-implement\)/);
+    assert.match(second.stdout, /reserved=10% \(ongoing: 1x implement\)/);
   } finally { fs.rmSync(s.stage, { recursive: true, force: true }); }
 });
 

@@ -59,7 +59,7 @@ In the checkout, `runtime/` contains the gateways and common deployment code. `s
 Use `codex` or `claude` for `<provider>` and the path to either installation for `<runtime>`. Start with the matching packet template under `<runtime>/templates/`.
 
 ```text
-node "<runtime>/scripts/<provider>-delegate.mjs" run --role astra-review --packet "<review.yaml>" --cwd "<project>" --background
+node "<runtime>/scripts/<provider>-delegate.mjs" run --role review --packet "<review.yaml>" --cwd "<project>" --background
 node "<runtime>/scripts/<provider>-delegate.mjs" collect <run-id> --wait
 ```
 
@@ -67,27 +67,32 @@ Both gateways also accept `status`, `result`, `cancel`, `show`, and `assess` wit
 
 ## Model configuration
 
-`runtime/config/models.json` maps each Codex worker role to a model ID and a default reasoning effort.
+`runtime/config/models.json` maps worker roles to model IDs and default effort for both lead installations. Top-level `roles` configures Codex workers. `claude.roles` configures Claude workers.
 
 ```json
-{ "roles": { "luna-implement": { "model": "gpt-6-luna", "effort": "high" }, "...": {} } }
+{
+  "roles": { "implement": { "model": "gpt-6-luna", "effort": "high" } },
+  "claude": { "roles": { "implement": { "model": "sonnet", "effort": "high" } } }
+}
 ```
 
 - **Change models for every machine:** edit `models.json`, commit, push, pull on each machine, deploy.
 - **One-machine override**. Create `runtime/config/models.local.json` in the checkout and rerun the installer. The installer also reads the older checkout path, `claude/global/config/models.local.json`, if the new one is absent. Both paths are gitignored.
-- **Effective settings**. Run `node "<runtime>/scripts/codex-delegate.mjs" models` using your installed runtime path.
+- **Effective settings**. Run `node "<runtime>/scripts/<provider>-delegate.mjs" models` using your installed runtime path.
 - **Valid efforts:** `none, minimal, low, medium, high, xhigh`. `--effort` on a single run still overrides the default.
 - **Bad config fails loudly.** An unknown role, a missing model, an invalid effort or invalid JSON stops `run` with a message naming the file. The wrapper never falls back to a built-in model.
 - **Check the model works first.** The Codex cache can list models your account or CLI still rejects. Before switching, run `codex exec --skip-git-repo-check --sandbox read-only --model <id> "Reply OK"`.
 
-The shared gateway defines the role's required packet keys, permissions, and report format. The configured model can vary by worker provider. See the [Claude worker setup](codex/LEAD_INSTALL.md#delegate-a-review-to-claude-code) for model and effort selection.
+The shared gateway defines each role's packet keys, permissions, and report format. Both gateways use `implement`, `implement-escalated`, `review`, and `investigate`. Codex also supports `test` for tasks that require a shell.
+
+Existing commands, model overrides and role prompt overrides can use the aliases `luna-implement`, `sol-implement`, `astra-review`, `astra-investigate`, and `luna-test`. When both names appear in the same config file, fields under the current role name take precedence. Quota configuration and stored run IDs and telemetry use the original identifiers.
 
 ## Project defaults
 
 A project can add rules to every packet it receives without touching the kit. Create `<repo>/.orchestration/project.json`; `templates/project.json` is an example. The wrapper looks for it from `--cwd` up to the git root, using the main checkout even for `--worktree` runs.
 
-- `constraints`, `required_checks`: appended to every Luna/Sol packet. Packets must use block lists (`key:` followed by `- item` lines); flow lists like `[]` are rejected so nothing gets silently dropped.
-- `context`: added to task packets as a `project_context:` block. Astra packets get it only with `"review_safe": true`, and never get the constraints or checks.
+- `constraints` and `required_checks` are appended to implementation and test packets. Packets must use block lists (`key:` followed by `- item` lines). The gateway rejects flow lists like `[]` when appending these defaults.
+- `context` is added to task packets as a `project_context:` block. Review and investigation packets receive this block only with `"review_safe": true`.
 - `roles.<role>.model` / `.effort` override the Codex worker defaults for that project. `--effort` on the command line still wins.
 - Strictly append-only: sandbox, git rules, the blind-review allowlist and the frozen prompt text can't be changed. Invalid files stop the run (exit 2) and name the file.
 - Each run records `project_config` (file, sha256, what was applied), `model_source`/`effort_source`, and `prompt_sha256`, so runs with and without project defaults stay comparable.
@@ -97,7 +102,7 @@ A project can add rules to every packet it receives without touching the kit. Cr
 
 Both gateways compose the prompt from shared base rules, a role prompt, a report contract, the packet, and a closing line. The worker uses the first available role prompt from this list.
 
-1. `<repo>/.orchestration/roles/<role>.md`: the nearest one from `--cwd` up to the git root, looked up separately for each role. It doesn't need a `project.json`. For `astra-review` / `astra-investigate`, it is used only if the same `.orchestration/` folder has a `project.json` with `"review_safe": true`.
+1. `<repo>/.orchestration/roles/<role>.md` is searched from `--cwd` up to the git root. For `review` and `investigate`, the same `.orchestration/` folder must have a `project.json` with `"review_safe": true`.
 2. `<runtime>/overrides/roles/<role>.md` for this runtime. Updates preserve it.
 3. The kit default in `<runtime>/prompts/roles/`.
 
@@ -128,7 +133,7 @@ Example: 60% remaining with one Astra and one Luna in flight leaves 60 − 25 �
 
 ## Claude workers
 
-`claude-delegate.mjs` runs Claude Code in print mode for `luna-implement`, `sol-implement`, `astra-review` and `astra-investigate`. `luna-test` stays on Codex because it needs a shell. Install Claude Code 2.1.286 or later; on Windows set `CLAUDE_BIN` to the native binary if `claude.exe` is not on PATH.
+`claude-delegate.mjs` runs Claude Code in print mode for `implement`, `implement-escalated`, `review` and `investigate`. Install Claude Code 2.1.286 or later. On Windows, set `CLAUDE_BIN` to the native binary if `claude.exe` is missing from PATH.
 
 **Auth.** By default a worker uses your own Claude Code login (`claude.auth: "subscription"` in `config/models.json`), the same way Codex workers use your Codex login. Set `ORCH_CLAUDE_AUTH=api` (or `claude.auth: "api"`) to use a Claude Console key from `ANTHROPIC_API_KEY` instead; the run then uses `--bare`. Anthropic's terms allow your own subscription for your own work; offering or routing other people's subscription logins is not allowed, so a redistributed or hosted setup must use API keys. [Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
 
@@ -136,7 +141,7 @@ Example: 60% remaining with one Astra and one Luna in flight leaves 60 − 25 �
 
 **Edits.** Implementation roles get `Read, Glob, Grep, Edit, Write` and no shell. Each `editable_paths` entry becomes a permission rule (`src/` becomes `Edit(./src/**)`), so the CLI denies any other edit. Entries must be relative to `--cwd`, without `..`, whitespace, commas or parentheses; an empty list stops the run. The prompt gets a generated note that the worker has no shell and must report checks as `not-run`: the lead runs them. After every write run (either gateway), files outside `editable_paths` are listed as `out_of_scope_files` and printed as `SCOPE: …`. `.git` and `.claude` are never editable: entries that could reach them are refused, write runs deny them in every spelling the CLI can express, and the git guard fails the run (exit 3) if a worker changed them anyway. The guard fingerprints the repository's `.claude` folders (including ones `.gitignore` hides), git config, hooks (including a `core.hooksPath` folder), `info/`, submodule git dirs and linked worktrees' metadata (a worktree added or removed during a run is not a violation; changing an existing one is).
 
-**Models.** `config/models.json` → `claude.roles` sets model and effort per role (defaults: `sonnet`, `opus` for `sol-implement`). `ORCH_CLAUDE_MODEL` overrides the model for every role; `--effort` overrides one run. `models`, `config --explain` and `quota` on the Claude gateway report the Claude settings.
+**Models.** `claude.roles` in `config/models.json` sets model and effort per role. The default is `sonnet` with `opus` for `implement-escalated`. `ORCH_CLAUDE_MODEL` overrides the model for every role. `--effort` overrides effort for one run.
 
 **Quota gate.** Configured in `config/quota.json` → `claude`; blocked runs exit **5** like Codex runs.
 - Subscription: the run is allowed only if `(100 − 5-hour used%) − reservations of Claude subscription runs in flight − the role's percent > 0` and the 7-day window has more than `seven_day_min_remaining`% left (set it to `null` for a plan without a weekly limit; otherwise a missing weekly reading blocks). Usage comes from `api.anthropic.com/api/oauth/usage`, read with the same login the worker uses: `CLAUDE_CODE_OAUTH_TOKEN` if set, else the token in Claude Code's credentials file (`$CLAUDE_CONFIG_DIR/.credentials.json`, default `~/.claude/.credentials.json`). The token is used for that one request and never written, logged or refreshed, and error messages never quote the file. This endpoint is undocumented; if it fails (expired token, keychain storage, network) or returns an out-of-range or already-reset reading, the run is blocked. A recent Claude Code transcript that recorded a `usage_limit_reached` rejection blocks until its reset time.

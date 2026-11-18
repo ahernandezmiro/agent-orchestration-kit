@@ -112,7 +112,7 @@ test("subscription is the default: no --bare, API key withheld, isolation set, l
   const key = "sk-ant-api-should-not-reach";
   const out = success(f.dispatch(["run", "--role", "astra-review", "--packet", review, "--cwd", f.project],
     { ANTHROPIC_API_KEY: key, CLAUDE_CODE_EFFORT_LEVEL: "low", ANTHROPIC_MODEL: "claude-other" }));
-  assert.match(out, /QUOTA GATE: OK backend=claude auth=subscription role=astra-review/);
+  assert.match(out, /QUOTA GATE: OK backend=claude auth=subscription role=review/);
   const run = f.runRecord(out);
   const worker = f.workerOutput(run);
   assert.ok(!worker.args.includes("--bare"));
@@ -125,7 +125,7 @@ test("subscription is the default: no --bare, API key withheld, isolation set, l
   assert.ok(worker.args.includes("--safe-mode"));
   const deployed = JSON.parse(fs.readFileSync(path.join(f.runtime, "deployed.json"), "utf8"));
   assert.equal(deployed.claude.auth, "subscription");
-  assert.equal(deployed.claude.roles["sol-implement"].model, "opus");
+  assert.equal(deployed.claude.roles["implement-escalated"].model, "opus");
   assert.equal(run.claude_auth, "subscription");
   assert.equal(run.model, "sonnet");
   assert.equal(run.quota_gate.allowed, true);
@@ -146,7 +146,7 @@ test("API-key mode is opt-in: needs the key, runs bare with a per-run cap and ga
   assert.match(missing.stderr, /^claude-delegate: Claude auth is 'api': set ANTHROPIC_API_KEY/);
   const withKey = { ...api, ANTHROPIC_API_KEY: "sk-ant-api-test" };
   const out = success(f.dispatch(args, withKey));
-  assert.match(out, /QUOTA GATE: OK backend=claude auth=api role=astra-review — \$10\.00 budget - \$0\.00 spent/);
+  assert.match(out, /QUOTA GATE: OK backend=claude auth=api role=review — \$10\.00 budget - \$0\.00 spent/);
   const run = f.runRecord(out);
   const worker = f.workerOutput(run);
   assert.equal(worker.args[0], "--bare");
@@ -270,7 +270,7 @@ test("sibling worktrees do not trip the guard; an ignored core.hooksPath folder 
 test("Claude gateway rejects luna-test and unsafe or empty editable_paths before submitting", (t) => {
   const f = fixture(t);
   for (const [role, editable, message] of [
-    ["luna-test", "[src/]", /Claude delegation supports luna-implement, sol-implement, astra-review, astra-investigate/],
+    ["test", "[src/]", /Claude delegation supports implement, implement-escalated, review, investigate/],
     ["luna-implement", "[]", /editable_paths is empty/],
     ["luna-implement", "[../outside]", /must not contain '\.\.'/],
     ["luna-implement", "[/etc]", /must be relative/]
@@ -289,7 +289,7 @@ test("subscription gate blocks on usage, unknown quota, a recorded rejection and
   f.setUsage(95);
   const high = f.dispatch(args);
   assert.equal(high.status, 5, high.stdout + high.stderr);
-  assert.match(high.stdout, /QUOTA GATE: BLOCKED backend=claude auth=subscription role=luna-implement — 5h effective 5% <= 10% required/);
+  assert.match(high.stdout, /QUOTA GATE: BLOCKED backend=claude auth=subscription role=implement — 5h effective 5% <= 10% required/);
   const blockedEvent = f.events().find((e) => e.type === "quota_gate_blocked");
   assert.equal(blockedEvent.backend, "claude");
 
@@ -330,9 +330,10 @@ test("subscription gate blocks on usage, unknown quota, a recorded rejection and
 test("Claude gateway reports its config, names itself in errors, totals usage and splits metrics by auth", (t) => {
   const f = fixture(t);
   const explain = (role, extra) => JSON.parse(success(f.dispatch(["config", "--explain", role, "--cwd", f.project, "--json"], extra)));
-  const review = explain("astra-review");
-  assert.deepEqual([review.backend, review.model, review.model_source, review.effort, review.auth, review.auth_source],
-    ["claude", "sonnet", "config", "high", "subscription", "config"]);
+  const review = explain("review");
+  assert.deepEqual([review.role, review.backend, review.model, review.model_source, review.effort, review.auth, review.auth_source],
+    ["review", "claude", "sonnet", "config", "high", "subscription", "config"]);
+  assert.deepEqual(explain("astra-review"), review);
   assert.equal(explain("sol-implement").model, "opus");
   const env = explain("luna-implement", { ORCH_CLAUDE_MODEL: "claude-example", ORCH_CLAUDE_AUTH: "api" });
   assert.deepEqual([env.model, env.model_source, env.auth, env.auth_source], ["claude-example", "env", "api", "env"]);
@@ -349,15 +350,16 @@ test("Claude gateway reports its config, names itself in errors, totals usage an
 
   const models = JSON.parse(success(f.dispatch(["models", "--json"])));
   assert.equal(models.auth, "subscription");
-  assert.deepEqual(Object.keys(models.roles), ["luna-implement", "sol-implement", "astra-review", "astra-investigate"]);
+  assert.deepEqual(Object.keys(models.roles), ["implement", "implement-escalated", "review", "investigate"]);
 
-  const launched = success(f.dispatch(["run", "--role", "astra-review", "--packet", fileURLToPath(new URL("R001-slug-registry.yaml", import.meta.url)), "--cwd", f.project, "--background"]));
+  const launched = success(f.dispatch(["run", "--role", "review", "--packet", fileURLToPath(new URL("R001-slug-registry.yaml", import.meta.url)), "--cwd", f.project, "--background"]));
+  assert.match(launched, /DELEGATE: role=review model=sonnet effort=high sandbox=read-only/);
   const runId = /DELEGATE: run=(\S+)/.exec(launched)[1];
   assert.match(success(f.dispatch(["collect", runId, "--wait"])), /status: completed/);
   assert.match(success(f.dispatch(["result", runId])), /status: completed/);
   assert.match(success(f.dispatch(["collect", runId])), /already finalized/);
 
-  const metrics = JSON.parse(success(f.dispatch(["metrics", "--json"])));
+  const metrics = JSON.parse(success(f.dispatch(["metrics", "--role", "review", "--json"])));
   assert.deepEqual(metrics.claude_usage, { input_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 5 });
   assert.equal(metrics.claude_cost_usd, 0.25);
   assert.match(success(f.dispatch(["metrics", "--by", "backend"])), /^claude-subscription\t1\t/m);

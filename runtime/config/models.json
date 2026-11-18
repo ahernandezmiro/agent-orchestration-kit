@@ -1,23 +1,23 @@
 {
-  "_description": "Model id and default reasoning effort per delegation role, read by codex-delegate.mjs at run time. Shared across machines: edit, commit, push, pull, deploy. Per-machine overrides go in models.local.json (gitignored, same shape, any subset of roles/fields). Valid efforts: none, minimal, low, medium, high, xhigh. Roles themselves (prompts, sandbox, contracts) are defined in scripts/codex-delegate.mjs and are not configurable here. Author: maintained with Claude Code for the frontier-model orchestration setup.",
+  "_description": "Model and default effort per worker role. Top-level roles configure Codex workers. The claude block configures Claude workers. Both lead clients install this file. Per-machine overrides go in models.local.json (gitignored, same shape, any subset of roles/fields). Valid Codex efforts: none, minimal, low, medium, high, xhigh.",
   "roles": {
-    "luna-implement": {
+    "implement": {
       "model": "gpt-6-luna",
       "effort": "high"
     },
-    "luna-test": {
+    "test": {
       "model": "gpt-6-luna",
       "effort": "high"
     },
-    "sol-implement": {
+    "implement-escalated": {
       "model": "gpt-6-sol",
       "effort": "high"
     },
-    "astra-review": {
+    "review": {
       "model": "gpt-6-astra",
       "effort": "high"
     },
-    "astra-investigate": {
+    "investigate": {
       "model": "gpt-6-astra",
       "effort": "high"
     }
@@ -26,19 +26,19 @@
     "_description": "Claude workers (claude-delegate.mjs): auth is subscription (the user's own Claude Code login, default) or api (ANTHROPIC_API_KEY, --bare). ORCH_CLAUDE_AUTH and ORCH_CLAUDE_MODEL override auth and every role's model. Valid efforts: low, medium, high, xhigh, max.",
     "auth": "subscription",
     "roles": {
-      "astra-review": {
+      "review": {
         "model": "sonnet",
         "effort": "high"
       },
-      "astra-investigate": {
+      "investigate": {
         "model": "sonnet",
         "effort": "high"
       },
-      "luna-implement": {
+      "implement": {
         "model": "sonnet",
         "effort": "high"
       },
-      "sol-implement": {
+      "implement-escalated": {
         "model": "opus",
         "effort": "high"
       }

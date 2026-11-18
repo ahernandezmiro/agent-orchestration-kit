@@ -89,9 +89,9 @@ test("nested roles dir without R.md does not hide parent R.md; empty roles dir c
 
 test("astra project override needs adjacent review_safe", (t) => {
   const f = fixture(t);
-  for (const role of ["astra-review", "astra-investigate"]) {
+  for (const [role, override] of [["astra-review", "review"], ["astra-investigate", "astra-investigate"]]) {
     for (const cfg of [null, { schema_version: 1, review_safe: false }]) {
-      const rolesDir = f.projectRoles(); const file = path.join(rolesDir, `${role}.md`); fs.writeFileSync(file, "PROJECT ASTRA TEXT");
+      const rolesDir = f.projectRoles(); const file = path.join(rolesDir, `${override}.md`); fs.writeFileSync(file, "PROJECT ASTRA TEXT");
       const global = path.join(f.globalRoles(), `${role}.md`); fs.writeFileSync(global, "GLOBAL ASTRA TEXT");
       if (cfg) projectConfig(f.repo, cfg); else fs.rmSync(path.join(f.repo, ".orchestration", "project.json"), { force: true });
       const result = f.run(role, f.repo, f.reviewPacket);

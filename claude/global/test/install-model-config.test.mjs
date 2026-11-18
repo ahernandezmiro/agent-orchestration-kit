@@ -49,7 +49,7 @@ function fixture(t) {
   const override = (model) => ({ roles: Object.fromEntries(Object.keys(base.roles).map(role => [role, { model }])) });
   const setCache = (models) => fs.writeFileSync(cache, JSON.stringify({ models: models.map(slug => ({ slug })) }));
   const install = (...args) => node(path.join(kit, "claude", "install.mjs"), args);
-  const models = () => JSON.parse(success(node(path.join(runtime, "scripts", "codex-delegate.mjs"), ["models", "--json"]))).roles;
+  const models = (provider = "codex") => JSON.parse(success(node(path.join(runtime, "scripts", `${provider}-delegate.mjs`), ["models", "--json"]))).roles;
   return { home, runtime, files, base, writeOverride, override, setCache, install, models };
 }
 
@@ -87,7 +87,10 @@ for (const [source, lowerPriority] of [["legacy", ["installed"]], ["current", ["
 
 test("legacy overrides merge with current defaults instead of stale installed defaults", (t) => {
   const f = fixture(t);
-  f.writeOverride("legacy", { roles: { "astra-review": { model: "review-model", effort: "low" } } });
+  f.writeOverride("legacy", {
+    roles: { "astra-review": { model: "review-model", effort: "low" } },
+    claude: { roles: { review: { effort: "max" }, "astra-review": { model: "haiku", effort: "low" } } }
+  });
   fs.mkdirSync(path.join(f.runtime, "config"), { recursive: true });
   fs.writeFileSync(path.join(f.runtime, "config", "models.json"), JSON.stringify({ roles: { "luna-test": { model: "stale" } } }));
   f.setCache([...Object.values(f.base.roles).map(role => role.model), "review-model"]);
@@ -95,7 +98,8 @@ test("legacy overrides merge with current defaults instead of stale installed de
   assert.match(checked, /\[ok\] model id review-model/);
   assert.doesNotMatch(checked, /model id stale/);
   success(f.install("--runtime-only"));
-  assert.deepEqual(f.models(), { ...f.base.roles, "astra-review": { model: "review-model", effort: "low" } });
+  assert.deepEqual(f.models(), { ...f.base.roles, review: { model: "review-model", effort: "low" } });
+  assert.deepEqual(f.models("claude"), { ...f.base.claude.roles, review: { model: "haiku", effort: "max" } });
 });
 
 for (const [label, value, message] of [

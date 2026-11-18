@@ -149,10 +149,11 @@ test("missing list keys are created, flow lists fail clearly, and invalid config
 test("config explain reports effective settings and validates role", (t) => {
   const f = fixture(t);
   writeProject(f, { schema_version: 1, constraints: ["one"], required_checks: ["check"], context: "context", review_safe: true,
-    roles: { "luna-implement": { model: "explained-model", effort: "medium" } } });
-  const explained = f.cli(["config", "--explain", "luna-implement", "--cwd", f.subdir, "--json"]);
+    roles: { "luna-implement": { model: "explained-model", effort: "low" }, implement: { effort: "medium" } } });
+  const explained = f.cli(["config", "--explain", "implement", "--cwd", f.subdir, "--json"]);
   assert.equal(explained.status, 0, explained.stdout + explained.stderr);
   const data = JSON.parse(explained.stdout);
+  assert.equal(data.role, "implement");
   assert.equal(data.model, "explained-model"); assert.equal(data.model_source, "project");
   assert.equal(data.effort, "medium"); assert.equal(data.effort_source, "project");
   assert.deepEqual(data.constraints, ["one"]); assert.deepEqual(data.required_checks, ["check"]);
