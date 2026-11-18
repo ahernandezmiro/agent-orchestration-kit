@@ -178,7 +178,14 @@ test("Claude implementation roles edit only through rules from editable_paths, w
 // R4, R7: whatever got past the CLI's rules, a change under .claude or inside .git fails the guard.
 test("a worker change under .claude or to .git config or hooks fails the git guard with exit 3", (t) => {
   const f = fixture(t);
-  for (const [file, reason] of [[".claude/settings.json", "protected_paths"], ["src/.Claude/notes.md", "protected_paths"], [".git/hooks/pre-commit", "git_internals"]]) {
+  // .gitignore hides .claude/ from the tree snapshot, so the direct fingerprint must catch it.
+  fs.writeFileSync(path.join(f.project, ".gitignore"), ".claude/\n");
+  for (const [file, reason] of [[".claude/settings.json", "protected_state"], ["src/.Claude/notes.md", "protected_state"], ["docs/.claude/agents/x.md", "protected_state"],
+    [".git/hooks/pre-commit", "protected_state"], [".git/info/attributes", "protected_state"], [".git/modules/sub/hooks/post-checkout", "protected_state"]]) {
+    if (file.startsWith(".git/modules/")) {
+      fs.mkdirSync(path.join(f.project, ".git", "modules", "sub"), { recursive: true });
+      fs.writeFileSync(path.join(f.project, ".git", "modules", "sub", "config"), "[core]\n");
+    }
     const result = f.dispatch(["run", "--role", "luna-implement", "--packet", f.packet("luna-implement"), "--cwd", f.project], { TEST_EDIT_FILES: file });
     assert.equal(result.status, 3, `${file}: ${result.stdout}${result.stderr}`);
     assert.match(result.stdout, /GIT GUARD: VIOLATION/);

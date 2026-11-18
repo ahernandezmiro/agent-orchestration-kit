@@ -60,7 +60,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolveCodexBin, resolveWorkerBin, buildExecArgs, submitJob, readJob, waitJob, cancelJob, reconcileLost, normalizeExecResult } from "./exec-backend.mjs";
 import {
-  CLAUDE_AUTH_MODES, CLAUDE_EFFORTS, CLAUDE_MIN_VERSION, buildClaudeArgs, claudeEnvironmentNote, claudeWorkerEnv, editRulesFor, protectedTouched, supportsClaudeVersion
+  CLAUDE_AUTH_MODES, CLAUDE_EFFORTS, CLAUDE_MIN_VERSION, buildClaudeArgs, claudeEnvironmentNote, claudeWorkerEnv, editRulesFor, PROTECTED_DIRS, protectedTouched, supportsClaudeVersion
 } from "./claude-backend.mjs";
 import {
   claudeOngoing, evaluateApiGate, evaluateSubscriptionGate, formatClaudeGateLine, loadClaudeQuotaRules, readRejectionOverride, readSubscriptionSnapshot
@@ -519,33 +519,69 @@ function gitSnapshot(cwd) {
     remotes: git(root, ["remote", "-v"]),
     stashes: git(root, ["stash", "list"]),
     porcelain: git(root, ["status", "--porcelain=v1"]),
-    git_internals: gitInternalsHash(root)
+    protected_state: protectedStateHash(root)
   };
 }
 
 /**
- * Fingerprint of the repository's config, hooks and info/ files, the parts of .git a worker could
- * change without moving refs. Reads the common dir, so worktrees share it with the main checkout.
- * Input: repository root. Output: sha256 hex, or null when the directory cannot be read.
+ * Fingerprint of what a worker could change to run code or redirect git without moving refs, read
+ * directly from disk so .gitignore cannot hide it:
+ *   - in the git common dir (shared by worktrees): config, config.worktree, hooks/, info/,
+ *     objects/info/alternates; for each submodule under modules/ the same files; for each linked
+ *     worktree under worktrees/ its config.worktree, commondir and gitdir;
+ *   - the repository's top-level .claude directory (Claude Code settings, hooks, agents).
+ * History, objects, logs and the index are left out so the lead's own git work does not trip it.
+ * Input: repository root. Output: sha256 hex, or null when the git dir cannot be resolved.
  */
-function gitInternalsHash(root) {
+function protectedStateHash(root) {
   const common = git(root, ["rev-parse", "--git-common-dir"]);
   if (!common) return null;
-  const dir = path.resolve(root, common);
+  const gitDir = path.resolve(root, common);
   const hash = crypto.createHash("sha256");
-  const add = (rel) => {
-    const file = path.join(dir, rel);
+  const add = (base, rel, label) => {
+    const file = path.join(base, rel);
     let stat;
-    try { stat = fs.statSync(file); } catch { return; }
-    if (stat.isDirectory()) {
-      for (const name of fs.readdirSync(file).sort()) add(path.join(rel, name));
+    try { stat = fs.lstatSync(file); } catch { return; }
+    const name = `${label}/${rel.split(path.sep).join("/")}`;
+    if (stat.isSymbolicLink()) {
+      hash.update(`${name}\0link\0${fs.readlinkSync(file)}\0`);
+    } else if (stat.isDirectory()) {
+      for (const child of fs.readdirSync(file).sort()) add(base, path.join(rel, child), label);
     } else if (stat.isFile()) {
-      hash.update(`${rel.split(path.sep).join("/")}\0`);
+      hash.update(`${name}\0`);
       hash.update(fs.readFileSync(file));
       hash.update("\0");
     }
   };
-  try { for (const rel of ["config", "hooks", "info"]) add(rel); } catch { return null; }
+  const gitSurfaces = ["config", "config.worktree", "hooks", "info", path.join("objects", "info", "alternates")];
+  const subdirs = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { return []; } };
+  const addModules = (moduleRoot, label) => {
+    // Submodule git dirs nest (modules/a/modules/b); a directory with a config file is a git dir.
+    for (const name of subdirs(moduleRoot)) {
+      const dir = path.join(moduleRoot, name);
+      if (fs.existsSync(path.join(dir, "config"))) {
+        for (const rel of gitSurfaces) add(dir, rel, `${label}/${name}`);
+        addModules(path.join(dir, "modules"), `${label}/${name}/modules`);
+      } else addModules(dir, `${label}/${name}`);
+    }
+  };
+  try {
+    for (const rel of gitSurfaces) add(gitDir, rel, "git");
+    addModules(path.join(gitDir, "modules"), "git/modules");
+    for (const name of subdirs(path.join(gitDir, "worktrees"))) {
+      for (const rel of ["config.worktree", "commondir", "gitdir"]) add(path.join(gitDir, "worktrees", name), rel, `git/worktrees/${name}`);
+    }
+    add(root, ".claude", "repo");
+    // .claude or .git folders that .gitignore hides from the tree snapshot, at any depth. Git lists
+    // an ignored directory once, at its top, so a protected folder inside a larger ignored folder
+    // (for example node_modules/) is not covered.
+    const ignored = spawnSync("git", ["-C", root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (ignored.status !== 0) return null;
+    const hidden = ignored.stdout.split("\0").filter(Boolean)
+      .filter((entry) => entry.split("/").some((segment) => PROTECTED_DIRS.includes(segment.replace(/[. ]+$/, "").toLowerCase())))
+      .map((entry) => entry.replace(/\/$/, "")).filter((entry) => entry.toLowerCase() !== ".claude").sort();
+    for (const entry of hidden) add(root, entry, "repo");
+  } catch { return null; }
   return hash.digest("hex");
 }
 
@@ -575,7 +611,7 @@ function verifyGit(baseline, { quiet = false, worktree = null } = {}) {
     if (relevantRefs(now?.refs) !== relevantRefs(baseline.refs)) changed.push("refs");
   } else changed = ["head", "branch", "refs", "remotes", "stashes"].filter((k) => (now?.[k] ?? null) !== baseline[k]);
   // Baselines saved before this field existed have no fingerprint to compare.
-  if (Object.hasOwn(baseline, "git_internals") && (now?.git_internals ?? null) !== baseline.git_internals) changed.push("git_internals");
+  if (Object.hasOwn(baseline, "protected_state") && (now?.protected_state ?? null) !== baseline.protected_state) changed.push("protected_state");
   if (changed.length === 0) {
     if (!quiet) console.log("GIT GUARD: OK (no commits, branch, ref, remote, stash, config or hook changes)");
     return { ok: true, changed, now };
