@@ -226,6 +226,7 @@ test("two overlapping launches that only fit once: exactly one is admitted", asy
   const results = await Promise.all([launch(), launch()]);
   fs.writeFileSync(wait, "go");
   assert.deepEqual(results.map((r) => r.status).sort(), [0, 5], results.map((r) => r.stdout + r.stderr).join("\n----\n"));
+  assert.ok(fs.statSync(path.join(f.home, ".orchestration-kit")).isDirectory(), "the admission lock lives in a private folder under the user's home");
   const admitted = results.find((r) => r.status === 0);
   success(f.dispatch(["collect", /DELEGATE: run=(\S+)/.exec(admitted.stdout)[1], "--wait"]));
 });
@@ -244,6 +245,16 @@ test("sibling worktrees do not trip the guard; an ignored core.hooksPath folder 
   const collected = f.dispatch(["collect", /DELEGATE: run=(\S+)/.exec(started)[1], "--wait"]);
   assert.equal(collected.status, 0, collected.stdout + collected.stderr);
   assert.match(collected.stdout, /GIT GUARD: OK/);
+
+  // An existing sibling's metadata changed during the run is still caught.
+  const wait2 = path.join(f.home, "release-worker-2");
+  const second = success(f.dispatch(["run", "--role", "luna-implement", "--packet", f.packet("luna-implement"), "--cwd", f.project, "--background", "--worktree"],
+    { TEST_WAIT_FILE: wait2, TEST_EDIT_FILES: "src/ok2.txt" }));
+  fs.appendFileSync(path.join(f.project, ".git", "worktrees", path.basename(sibling), "gitdir"), "\n");
+  fs.writeFileSync(wait2, "go");
+  const tampered = f.dispatch(["collect", /DELEGATE: run=(\S+)/.exec(second)[1], "--wait"]);
+  assert.equal(tampered.status, 3, tampered.stdout + tampered.stderr);
+  assert.match(tampered.stdout, /protected_worktrees/);
   f.git("worktree", "remove", "--force", sibling);
 
   fs.mkdirSync(path.join(f.project, ".githooks"));

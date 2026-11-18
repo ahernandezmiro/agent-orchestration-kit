@@ -519,7 +519,8 @@ function gitSnapshot(cwd) {
     remotes: git(root, ["remote", "-v"]),
     stashes: git(root, ["stash", "list"]),
     porcelain: git(root, ["status", "--porcelain=v1"]),
-    protected_state: protectedStateHash(root)
+    protected_state: protectedStateHash(root),
+    protected_worktrees: worktreeHashes(root)
   };
 }
 
@@ -533,6 +534,36 @@ function gitSnapshot(cwd) {
  * History, objects, logs and the index are left out so the lead's own git work does not trip it.
  * Input: repository root. Output: sha256 hex, or null when the git dir cannot be resolved.
  */
+/**
+ * One fingerprint per linked worktree (config.worktree, commondir, gitdir under the common dir's
+ * worktrees/<name>). verifyGit compares the worktrees present both before and after a run, so a
+ * sibling worktree created or removed meanwhile is not a violation, but changing an existing
+ * one is. Input: repository root. Output: { <name>: sha256 hex } or null.
+ */
+function worktreeHashes(root) {
+  const common = git(root, ["rev-parse", "--git-common-dir"]);
+  if (!common) return null;
+  const dir = path.join(path.resolve(root, common), "worktrees");
+  let names;
+  try { names = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); }
+  catch { return {}; }
+  const result = {};
+  for (const name of names) {
+    const hash = crypto.createHash("sha256");
+    for (const rel of ["config.worktree", "commondir", "gitdir"]) {
+      const file = path.join(dir, name, rel);
+      try {
+        const stat = fs.lstatSync(file);
+        hash.update(`${rel}\0`);
+        hash.update(stat.isSymbolicLink() ? `link\0${fs.readlinkSync(file)}` : stat.isFile() ? fs.readFileSync(file) : "other");
+        hash.update("\0");
+      } catch { hash.update(`${rel}\0missing\0`); }
+    }
+    result[name] = hash.digest("hex");
+  }
+  return result;
+}
+
 function protectedStateHash(root) {
   const common = git(root, ["rev-parse", "--git-common-dir"]);
   if (!common) return null;
@@ -568,13 +599,8 @@ function protectedStateHash(root) {
   try {
     for (const rel of gitSurfaces) add(gitDir, rel, "git");
     addModules(path.join(gitDir, "modules"), "git/modules");
-    // Only this checkout's own worktree admin dir: sibling worktrees come and go while workers run
-    // (the kit's own --worktree runs create them), and their branches are outside the guard too.
-    const ownDir = git(root, ["rev-parse", "--git-dir"]);
-    const ownGitDir = ownDir ? path.resolve(root, ownDir) : gitDir;
-    if (path.resolve(ownGitDir).toLowerCase() !== path.resolve(gitDir).toLowerCase()) {
-      for (const rel of ["config.worktree", "commondir", "gitdir"]) add(ownGitDir, rel, "git/this-worktree");
-    }
+    // Linked worktrees' metadata is fingerprinted per worktree (worktreeHashes), because worktrees
+    // come and go while workers run (the kit's own --worktree runs create them).
     // Files git executes or reads as config from elsewhere: core.hooksPath, a core.fsmonitor hook
     // script, and include/includeIf targets. Read from the effective config, so a hooks folder
     // that .gitignore hides is still covered.
@@ -638,6 +664,14 @@ function verifyGit(baseline, { quiet = false, worktree = null } = {}) {
   // Baselines saved before this field existed have no fingerprint to compare.
   if (Object.hasOwn(baseline, "protected_state")) {
     if ((now?.protected_state ?? null) !== baseline.protected_state) changed.push("protected_state");
+    if (Object.hasOwn(baseline, "protected_worktrees")) {
+      const before = baseline.protected_worktrees;
+      const after = now?.protected_worktrees;
+      // Fail closed when either side could not be read; otherwise compare worktrees in both.
+      if (!before || !after || Object.keys(before).some((name) => Object.hasOwn(after, name) && after[name] !== before[name])) {
+        changed.push("protected_worktrees");
+      }
+    }
   } else if (Object.hasOwn(baseline, "git_internals")) {
     // A baseline from the short-lived git_internals version cannot be compared: fail closed.
     changed.push("protected_state");
@@ -805,13 +839,16 @@ async function checkClaudeQuota(roleName, auth) {
 }
 
 /**
- * Cross-runtime lock for Claude admission. Every local runtime runs as the same user, so a file in
- * the user's temp directory is shared by the Claude Code and Codex installations. A lock whose
- * owner process is gone, or that is older than two minutes, is stale and taken over.
+ * Cross-runtime lock for Claude admission. Both local runtimes (Claude Code and Codex installs)
+ * run as the same user, so the lock lives in a private folder in that user's home directory,
+ * never in a temp directory other accounts can write to. A lock whose owner process is gone, or
+ * that is older than two minutes, is stale and taken over.
  * Input: wait timeout. Output: Promise<release function>; exits 2 if the lock stays busy.
  */
-const ADMISSION_LOCK = path.join(os.tmpdir(), "orchestration-claude-admission.lock");
+const ADMISSION_LOCK_DIR = path.join(os.homedir(), ".orchestration-kit");
+const ADMISSION_LOCK = path.join(ADMISSION_LOCK_DIR, "claude-admission.lock");
 async function acquireAdmissionLock(timeoutMs = 60000) {
+  fs.mkdirSync(ADMISSION_LOCK_DIR, { recursive: true, mode: 0o700 });
   const deadline = Date.now() + timeoutMs;
   while (true) {
     try { fs.writeFileSync(ADMISSION_LOCK, `${process.pid}\n${Date.now()}\n`, { flag: "wx" }); break; }
